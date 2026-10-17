@@ -1,0 +1,62 @@
+{
+  "_comment": "security-ci suppressions (fail-closed). Each entry MUST carry: (1) exact identity via source_id OR tool+rule+path_contains (bare tool+rule is class-wide and rejected); (2) suppressing disposition in {accepted-false-positive,false-positive,remediated,risk-accepted,wont-fix} — deferred/open are ledger states and never suppress; (3) reason/rationale; (4) owner; (5) typed Security approval (owner or approved_by exactly security|sec|security-lead|sec-lead|security-team or those local-parts @domain — no substring spoofs); (6) non-expired expires (YYYY-MM-DD or ISO datetime). Malformed/expired/unauthorized rows never suppress and are logged ERROR. See scripts/security-ci-to-pulse.py::validate_allowlist_entry.",
+  "allowlist": [
+    {
+      "tool": "bandit",
+      "rule": "B104",
+      "path_contains": "mcp-server/",
+      "owner": "engineering",
+      "reason": "Intentional and required: the MCP servers bind 0.0.0.0 to be reachable across internal Docker/Tailscale networking (not public-facing; DNS-rebind protection is deliberately disabled for these internal services). Binding 127.0.0.1 would make them unreachable from other pods. PLAT-1562 (base.py), PLAT-1564 (pulse_server.py).",
+      "disposition": "accepted-false-positive",
+      "expires": "2099-12-31",
+      "approved_by": "security@shizuha.com"
+    },
+    {
+      "tool": "bandit",
+      "rule": "B104",
+      "path_contains": "taskmanager/settings.py",
+      "owner": "engineering",
+      "reason": "False positive: the flagged '0.0.0.0' literal is an entry in Django ALLOWED_HOSTS, not a socket bind. PLAT-1566.",
+      "disposition": "accepted-false-positive",
+      "expires": "2099-12-31",
+      "approved_by": "security@shizuha.com"
+    },
+    {
+      "tool": "semgrep",
+      "rule": "jwt-hardcoded-secret",
+      "path_contains": "mcp-server/test_token_refresh.py",
+      "reason": "false positive: test-only JWT fixture secret literal, not a runtime credential",
+      "owner": "security@shizuha.com",
+      "disposition": "accepted-false-positive",
+      "expires": "2099-12-31"
+    },
+    {
+      "tool": "semgrep",
+      "rule": "jwt-hardcoded-secret",
+      "path_contains": "mcp-server/test_token_verifier.py",
+      "reason": "false positive: test-only JWT key fixture literal, not a runtime credential",
+      "owner": "security@shizuha.com",
+      "disposition": "accepted-false-positive",
+      "expires": "2099-12-31"
+    },
+    {
+      "tool": "semgrep",
+      "rule": "gha-curl-pipe-shell",
+      "path_contains": ".forgejo/workflows/security-ci.yml",
+      "reason": "accepted workflow bootstrap: installs Trivy release binary inside the isolated CI job before scanning",
+      "owner": "security@shizuha.com",
+      "disposition": "accepted-false-positive",
+      "expires": "2099-12-31"
+    },
+    {
+      "tool": "deps",
+      "rule": "pkg:shizuha-labs/shizuha-tasks:PyPI:python-multipart",
+      "path_contains": "deps/PyPI/python-multipart",
+      "source_id": "security-ci:2f8620abde3158ee5d453ee5",
+      "owner": "security@shizuha.com",
+      "reason": "Accepted false positive (adjudicated PLAT-3069, 2026-07-04, security-lead; recurs as PLAT-4551). python-multipart is NOT pinned in any manifest - it is a transitive dependency of `mcp` only; mcp-server/requirements.txt and pyproject.toml declare no python-multipart line, and dependency resolution installs a patched release (0.0.32+, above every listed fixed floor 0.0.18-0.0.31). No direct parser import/use in-repo. Re-remediate only if security-ci reports a concrete manifest pin below the fixed floor.",
+      "disposition": "accepted-false-positive",
+      "expires": "2099-12-31"
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+# Sphinx Documentation Requirements
+# =================================
+
+# Core Sphinx
+sphinx>=7.2.0
+sphinx-autobuild>=2024.0.0  # Live reload server
+
+# Theme - Furo (modern, clean, responsive)
+furo>=2024.1.0
+
+# Sphinx Extensions
+sphinx-autodoc-typehints>=1.25.0  # Better type hints in docs
+sphinx-copybutton>=0.5.0  # Copy button for code blocks
+sphinx-design>=0.5.0  # Cards, tabs, grids, badges
+sphinxcontrib-mermaid>=0.9.0  # Mermaid diagrams
+sphinx-tabs>=3.4.0  # Tabbed content
+
+# API Documentation
+drf-spectacular>=0.27.0  # OpenAPI schema generation for DRF
+sphinxcontrib-openapi>=0.8.0  # OpenAPI/Swagger in Sphinx
+
+# Code Quality in Docs
+myst-parser>=2.0.0  # Markdown support in Sphinx
+linkify-it-py>=2.0.0  # Auto-link URLs
+
+# Django Integration (for autodoc)
+Django>=4.2.30
+djangorestframework>=3.14.0
+
+
+# Security constraints for transitive HTTP/IDNA dependencies
+h11>=0.16.0  # GHSA-vqfr-h8mv-ghfj / PLAT-3048
+idna>=3.15  # GHSA-65pc-fj4g-8rjx / PLAT-3049
+
+# Watch dependencies (for auto-reload)
+watchdog>=3.0.0

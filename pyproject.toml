@@ -1,0 +1,77 @@
+# Tooling note: generate/update uv.lock with uv 0.11.26; Docker and Forgejo CI pin the same uv version.
+[project]
+name = "shizuha-tasks"
+version = "0.1.0"
+description = "Shizuha Pulse / Tasks backend service"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "Django>=4.2.30,<5.0",
+  "gunicorn>=21.0",
+  "djangorestframework>=3.14.0",
+  "django-celery-beat>=2.5.0",
+  # PLAT-11277: exact verified pair. Upstream celery 5.6.3 declares
+  # kombu>=5.6.0; 5.6.2 is the newest 5.6.x and is the pair that ran in the
+  # last known-good digest (dd50dbeb) before the dequeue wedge. Fork images
+  # must build from exactly this pair — no float, no minor drift.
+  "celery==5.6.3",
+  "kombu==5.6.2",
+  "redis>=4.5.0",
+  "psycopg2-binary>=2.9.0",
+  "django-cors-headers>=4.0.0",
+  "requests>=2.31.0",
+  "drf-spectacular>=0.27.0",
+  "minio>=7.2.0",
+  "Pillow>=12.3.0",
+  "djangorestframework-simplejwt>=5.3.0",
+  "django-allauth>=0.61.0",
+  "dj-rest-auth>=5.0.0",
+  "PyJWT>=2.13.0",
+  "cryptography>=41.0.0",
+  "opentelemetry-api>=1.27.0,<2.0",
+  "opentelemetry-sdk>=1.27.0,<2.0",
+  "opentelemetry-exporter-otlp>=1.27.0,<2.0",
+  "opentelemetry-exporter-otlp-proto-common>=1.27.0,<2.0",
+  "opentelemetry-exporter-otlp-proto-grpc>=1.27.0,<2.0",
+  "opentelemetry-exporter-otlp-proto-http>=1.27.0,<2.0",
+  "opentelemetry-proto>=1.27.0,<2.0",
+  "opentelemetry-semantic-conventions>=0.48b0,<1.0",
+  "opentelemetry-instrumentation>=0.48b0,<1.0",
+  "opentelemetry-instrumentation-celery>=0.48b0,<1.0",
+  "opentelemetry-instrumentation-dbapi>=0.48b0,<1.0",
+  "opentelemetry-instrumentation-django>=0.48b0,<1.0",
+  "opentelemetry-instrumentation-psycopg2>=0.48b0,<1.0",
+  "opentelemetry-instrumentation-redis>=0.48b0,<1.0",
+  "opentelemetry-instrumentation-requests>=0.48b0,<1.0",
+  "opentelemetry-instrumentation-wsgi>=0.48b0,<1.0",
+  "opentelemetry-util-http>=0.48b0,<1.0",
+  # protobuf is transitive (via opentelemetry-proto). Pin the security floor
+  # explicitly so a future re-lock can't slide back below the CVE-2026-0994 /
+  # GHSA-7gcm-g887-7qv7 fix (json_format recursion-depth DoS). Ref: PLAT-3070.
+  "protobuf>=5.29.6,<7.0",
+  "mcp>=1.23.0,<2.0.0",
+  "watchfiles>=1.0.0",
+]
+
+[tool.uv]
+package = false
+# PLAT-6744: sqlparse 0.5.5 is affected by GHSA-prg7-hcfm-mfcr (ReDoS) + 3
+# others; OSV fixed in 0.6.0. Constrain the transitive floor (django pulls
+# sqlparse) so a re-lock cannot slide back below the fix.
+constraint-dependencies = ["sqlparse>=0.6.0"]
+# sqlparse 0.6.0 (2026-08-13) is the OSV-fixed version for the above advisory;
+# it postdates the PLAT-1611 exclude-newer cooldown. Override the cutoff for
+# this one package — a security-fix floor, not a risky new release.
+# PLAT-10465: pyjwt 2.15.0 (CVE-2026-102268 fix floor >=2.14.0) was published
+# 2026-09-23 — postdating the PLAT-1611 cooldown, so CI resolution fails with
+# "no version of pyjwt==2.15.0" without this override. Same security-fix-floor
+# rationale as the sqlparse override above.
+exclude-newer-package = { sqlparse = "2026-08-13T19:16:10Z", pyjwt = "2026-09-24T00:00:00Z" }
+# PLAT-1611 (semgrep uv-missing-dependency-cooldown, CWE-829): wait ~7 days before
+# resolving newly published package versions, so a freshly-published malicious or
+# broken release isn't pulled into a build immediately.
+# MUST be an ABSOLUTE timestamp, not a relative "7 days": a relative cutoff slides
+# with wall-clock time, so `uv sync --locked` re-resolves differently whenever any
+# dependency release crosses the boundary — image builds then fail "lockfile needs
+# to be updated" at random (broke every shizuha-tasks deploy 2026-07-03/04).
+# When you run `uv lock`, refresh this to (now - 7 days) RFC 3339.
+exclude-newer = "2026-08-01T00:00:00Z"

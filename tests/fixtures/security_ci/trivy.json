@@ -1,0 +1,1 @@
+{"Results":[{"Target":"requirements.txt","Vulnerabilities":[{"VulnerabilityID":"CVE-2099-0001","PkgName":"demo","Severity":"CRITICAL","Title":"demo critical vuln","PrimaryURL":"https://trivy.dev/"}]}]}

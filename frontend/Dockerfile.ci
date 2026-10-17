@@ -1,0 +1,33 @@
+# =============================================================================
+# CI Dockerfile — standalone-repo frontend build.
+# Build context = the service repo root; dependencies are locked and vendored.
+# =============================================================================
+
+FROM node:20-alpine AS builder
+WORKDIR /build
+
+ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org/
+ENV NPM_CONFIG_REGISTRY=$NPM_CONFIG_REGISTRY
+
+COPY frontend/package*.json ./
+COPY frontend/vendor/ ./vendor/
+RUN npm ci --no-audit --no-fund
+
+COPY frontend/ .
+
+ARG VITE_BASE_PATH=/pulse/
+ARG VITE_API_BASE=/pulse/api
+ENV VITE_BASE_PATH=$VITE_BASE_PATH
+ENV VITE_API_BASE=$VITE_API_BASE
+ENV VITE_HMR_DISABLE=true
+ENV NODE_ENV=production
+
+RUN npm run build
+
+FROM nginx:alpine
+COPY --from=builder /build/nginx.prod.conf /etc/nginx/conf.d/default.conf
+COPY --from=builder /build/dist /usr/share/nginx/html
+EXPOSE 80
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1/health || exit 1
+CMD ["nginx", "-g", "daemon off;"]

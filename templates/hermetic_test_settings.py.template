@@ -1,0 +1,59 @@
+"""Copy to <service_project>/test_settings.py and invoke explicitly in CI.
+
+Example:
+    python manage.py test <app> --settings=<service_project>.test_settings
+
+PLAT-1358 invariant: tests run on a clean runner with no dependency on live
+shared services. Use loopback-only, test-owned services or in-memory fakes.
+"""
+from .settings import *  # noqa: F401,F403
+
+import os
+import faulthandler
+
+TESTING = True
+SECRET_KEY = os.environ.get('SECRET_KEY', 'ci-test-secret')
+DEBUG = True
+PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']
+EMAIL_BACKEND = 'django.core.mail.backends.locmem.EmailBackend'
+# For unittest/Django DiscoverRunner services, vendor the runner template below
+# or point this at an equivalent runner that installs socket_guard.
+TEST_RUNNER = '<service_project>.test_runner.HermeticDiscoverRunner'
+CHANNEL_LAYERS = {'default': {'BACKEND': 'channels.layers.InMemoryChannelLayer'}}
+CACHES = {'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}}
+
+# Pure-logic suites may use SQLite. Suites that need Postgres semantics should
+# point these env vars at a throwaway CI-owned local Postgres container/job.
+DATABASES = {
+    'default': {
+        'ENGINE': os.environ.get('TEST_DB_ENGINE', 'django.db.backends.sqlite3'),
+        'NAME': os.environ.get('TEST_DB_NAME', ':memory:'),
+        'USER': os.environ.get('TEST_DB_USER', ''),
+        'PASSWORD': os.environ.get('TEST_DB_PASSWORD', ''),
+        'HOST': os.environ.get('TEST_DB_HOST', ''),
+        'PORT': os.environ.get('TEST_DB_PORT', ''),
+    }
+}
+
+# Never point tests at shared Redis/brokers. Prefer eager/no-op; inject fakeredis
+# in tests that exercise Redis-specific behavior.
+CELERY_TASK_ALWAYS_EAGER = True
+CELERY_TASK_EAGER_PROPAGATES = True
+CELERY_BROKER_URL = os.environ.get('TEST_CELERY_BROKER_URL', 'memory://')
+CELERY_RESULT_BACKEND = os.environ.get('TEST_CELERY_RESULT_BACKEND', 'cache+memory://')
+
+# Cross-service seams: tests must stub/fake these. Loopback discard defaults make
+# accidental use fast-fail under the socket guard instead of dialing live infra.
+SHIZUHA_ID_API_URL = os.environ.get('TEST_SHIZUHA_ID_API_URL', 'http://127.0.0.1:9/api')
+SHIZUHA_CONNECT_API_URL = os.environ.get('TEST_SHIZUHA_CONNECT_API_URL', 'http://127.0.0.1:9/api')
+CORTEX_API_URL = os.environ.get('TEST_CORTEX_API_URL', 'http://127.0.0.1:9/api')
+NOTIFICATIONS_API_URL = os.environ.get('TEST_NOTIFICATIONS_API_URL', 'http://127.0.0.1:9/api')
+PUSH_API_URL = os.environ.get('TEST_PUSH_API_URL', 'http://127.0.0.1:9/api')
+
+# Hang diagnostics: dump stacks before the CI wall-clock timeout kills the job.
+# PLS-619: 900s, matching taskmanager/test_settings.py. A 300s default fires
+# during HEALTHY runs once a suite grows past it, and the dump itself can
+# segfault while walking a concurrently-mutating Django stack. Keep this above
+# normal suite runtime and below the consuming service's CI gate.
+if os.environ.get('SHIZUHA_TEST_FAULTHANDLER', '1') not in {'0', 'false', 'False'}:
+    faulthandler.dump_traceback_later(int(os.environ.get('SHIZUHA_TEST_TRACEBACK_AFTER', '900')), repeat=True)

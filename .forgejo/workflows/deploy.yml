@@ -1,0 +1,1097 @@
+# Shizuha Origin CI/CD — MULTI-ARCH build + deploy shizuha-pulse (ORIG-7 Plan A).
+# Lives in the pulse repo (renamed from shizuha-tasks 2026-09-02); triggers on its own pushes.
+# Builds shizuha-pulse for BOTH amd64 + arm64 via two in-cluster kaniko Jobs (arch-matched nodes),
+# combines them into a multi-arch manifest list with crane, deploys the list, and verifies.
+# Multi-arch = the image runs on any platform node (s1 amd64 OR gx10 arm64) per PLAT-718 —
+# no single-arch regression / exec-format crashes. Auth = KUBE_CONFIG_B64 org secret
+# (least-privilege origin-ci-deployer SA). No submodule checkout, no docker-in-DinD.
+name: deploy-shizuha-pulse
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main, master]
+    # Forgejo supports on.push.paths (allowlist form only). Frontend-only and
+    # docs-only commits are shipped by deploy-frontend.yml, so this backend
+    # pipeline rebuilds + reruns the suite only when a backend-relevant path
+    # changes. Conservative by design: when unsure whether a path affects the
+    # backend image/tests, INCLUDE it here (fail-safe = rebuild, never skip).
+    paths:
+      - '.forgejo/workflows/deploy.yml'
+      - '.forgejo/scripts/**'
+      - 'Dockerfile*'
+      - '.dockerignore'
+      - 'docker-entrypoint.sh'
+      - 'run_server.sh'
+      - 'supervisord.conf'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'manage.py'
+      - 'taskmanager/**'
+      - 'tasks/**'
+      - 'mcp-server/**'
+      - 'templates/**'
+      - 'tests/**'
+      - 'test_scripts/**'
+      - 'scripts/**'
+      - 'test_*.py'
+# Concurrency is job-scoped below: tests supersede stale tests, and a deploy
+# becomes eligible only after its own test and multi-arch build pass. At that
+# point it safely supersedes an older deploy so an obsolete convergence waiter
+# cannot wedge the release lane. A workflow-wide lock lets a lost test runner
+# wedge every newer run before those job-level controls can take effect.
+jobs:
+  test:
+    # PLS-1018: fork-PR push-event runs on refs/pull/*/head receive NO secrets
+    # and fail in seconds, overriding the green pull_request run for the same
+    # context and blocking the merge gate on reviewed fork PRs. Skip push runs
+    # on fork-PR head refs; the pull_request runs remain authoritative.
+    if: github.event_name != 'push' || !startsWith(github.ref, 'refs/pull/')
+    concurrency:
+      group: deploy-shizuha-pulse-test-${{ github.ref }}
+      cancel-in-progress: true
+    # This job only orchestrates an isolated in-cluster test Job, and the
+    # eight-worker suite now completes in seconds.  The shared ubuntu lane is
+    # also used by long security/migration workloads; in production it left
+    # this required gate unscheduled after both release images were already
+    # built.  Keep the release path deterministic on the dedicated lane.  The
+    # actual workload still runs in the build namespace, while the deploy job's
+    # separate concurrency group remains the sole serialized release writer.
+    runs-on: deploy-lane
+    container:
+      image: registry.registry.svc.cluster.local:5000/origin-ci-helm@sha256:90f02d48d68c0ed690f9ddd8bcef1167490610362c19d429943931433ed7b194
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install kubectl + cluster access
+        run: |
+          set -euo pipefail
+          # Pinned toolbox vendors the client; do not download it per job.
+          kubectl version --client -o json | python3 -c 'import json,sys; assert json.load(sys.stdin)["clientVersion"]["gitVersion"].split("+")[0] == "v1.34.6"'
+          helm version --short | grep -F 'v3.21.2'
+          mkdir -p "$HOME/.kube"
+          printf '%s' "${{ secrets.KUBE_CONFIG_B64 }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+      - name: Run backend test suite before deploy
+        run: |
+          set -euo pipefail
+          SHORT="$(echo "${{ github.sha }}" | cut -c1-7)"
+          JOB="ci-test-shizuha-pulse-${SHORT}"
+          kubectl delete job -n build "${JOB}" --ignore-not-found
+
+          cat <<YAML | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${JOB}
+            namespace: build
+            labels: { app: ci-test, service: shizuha-pulse, shizuha.io/ci-gate: PLAT-1219, shizuha.io/orig-task: ORIG-9 }
+          spec:
+            backoffLimit: 0
+            # ORIG-11 2026-07-16: the CI gate stops polling at its timeout, but a
+            # wedged suite pod (e.g. apt hung through the cache proxy during a
+            # gx->s1 stall, PLAT-4692) runs forever and leaks its memory request
+            # (three such pods found Running 10-15h). Reap the Job shortly after
+            # the gate has given up; ttl only applies once the Job finishes.
+            activeDeadlineSeconds: 2100
+            ttlSecondsAfterFinished: 3600
+            template:
+              spec:
+                restartPolicy: Never
+                affinity:
+                  nodeAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                      nodeSelectorTerms:
+                      - matchExpressions:
+                        - { key: node-role.kubernetes.io/control-plane, operator: DoesNotExist }
+                initContainers:
+                  - name: git-clone
+                    image: alpine/git:2.43.0
+                    command: ["/bin/sh","-c"]
+                    args:
+                      - |
+                        set -euo pipefail
+                        SOURCE_URL="\${GIT_SOURCE_URL:-}"
+                        SOURCE_SHA="\${GIT_SOURCE_SHA:-}"
+                        [ -n "\${SOURCE_URL}" ] && [ "\${SOURCE_URL}" != "<no value>" ] || SOURCE_URL="http://forgejo-http.origin.svc.cluster.local/${{ github.repository }}.git"
+                        [ -n "\${SOURCE_SHA}" ] && [ "\${SOURCE_SHA}" != "<no value>" ] || SOURCE_SHA="${{ github.sha }}"
+                        case "\${SOURCE_URL}" in
+                          http://forgejo-http.origin.svc.cluster.local/*) AUTH_URL="http://x-token-auth:\${GIT_PASSWORD}@forgejo-http.origin.svc.cluster.local/\${SOURCE_URL#http://forgejo-http.origin.svc.cluster.local/}" ;;
+                          https://origin.shizuha.com/*) AUTH_URL="http://x-token-auth:\${GIT_PASSWORD}@forgejo-http.origin.svc.cluster.local/\${SOURCE_URL#https://origin.shizuha.com/}" ;;
+                          *) echo "refusing non-Origin source URL: \${SOURCE_URL}" >&2; exit 64 ;;
+                        esac
+                        git init /workspace/src
+                        cd /workspace/src
+                        git remote add origin "\${AUTH_URL}"
+                        git fetch --depth=1 origin "\${SOURCE_SHA}"
+                        git checkout --detach FETCH_HEAD
+                        # This script is embedded in an unquoted outer heredoc; escape
+                        # command substitution so the in-pod shell (not the Origin
+                        # runner) evaluates it. Otherwise push builds render this as
+                        # \`test "" = "\${SOURCE_SHA}"\` and the init container fails.
+                        test "\$(git rev-parse HEAD)" = "\${SOURCE_SHA}"
+                    env:
+                      - name: GIT_PASSWORD
+                        valueFrom: { secretKeyRef: { name: forgejo-token, key: password } }
+                      - name: GIT_SOURCE_URL
+                        value: "${{ github.event.pull_request.head.repo.clone_url }}"
+                      - name: GIT_SOURCE_SHA
+                        value: "${{ github.event.pull_request.head.sha }}"
+                    volumeMounts: [{ mountPath: /workspace, name: workspace }]
+                containers:
+                  - name: test
+                    image: python:3.12-bookworm
+                    command: ["/bin/bash","-lc"]
+                    args:
+                      - |
+                        set -euo pipefail
+                        export DEBIAN_FRONTEND=noninteractive
+                        printf '%s\n' \
+                          'Acquire::http::Proxy "http://apt-cache.registry.svc.cluster.local:3142";' \
+                          'Acquire::Retries "10";' \
+                          'Acquire::http::Timeout "30";' \
+                          > /etc/apt/apt.conf.d/01proxy
+                        apt_update() {
+                          # A corrupt/stale partial InRelease previously left apt's
+                          # http+gpgv workers alive forever despite Acquire timeout.
+                          # Bound the whole command and discard only job-local partials.
+                          rm -f /var/lib/apt/lists/partial/*
+                          timeout 180 apt-get -o Acquire::http::Proxy=http://apt-cache.registry.svc.cluster.local:3142 update
+                        }
+                        apt_install() {
+                          timeout 300 apt-get -o Acquire::http::Proxy=http://apt-cache.registry.svc.cluster.local:3142 install -y --no-install-recommends postgresql redis-server build-essential libpq-dev curl
+                        }
+                        for attempt in 1 2 3; do
+                          if apt_update && apt_install; then
+                            break
+                          fi
+                          [ "\${attempt}" -lt 3 ] || { echo "apt bootstrap failed after 3 bounded attempts" >&2; exit 1; }
+                          sleep "\$((attempt * 5))"
+                        done
+                        pg_ctlcluster -o "-c fsync=off -c synchronous_commit=off -c full_page_writes=off" 15 main start
+                        su postgres -c "psql -c \"ALTER USER postgres PASSWORD 'postgres';\""
+                        su postgres -c "createdb shizuha_pulse_ci" || true
+                        redis-server --daemonize yes
+                        # PLAT-5343: health gate — the backend suite's isolated
+                        # liveness client pings fail-loud, and both liveness legs
+                        # swallow store errors; racing an unbound sidecar turned
+                        # transient unavailability into a bare
+                        # assertIsNotNone(None) red (06f4dbf class). Wait bounded
+                        # for bind before the suite starts. Dependency-free on
+                        # purpose: bash /dev/tcp, no redis-cli (the review seat
+                        # flagged command availability as a fail-fast hypothesis).
+                        for i in \$(seq 1 20); do
+                          (exec 3<>/dev/tcp/127.0.0.1/6379) 2>/dev/null && break
+                          sleep 0.5
+                        done
+                        (exec 3<>/dev/tcp/127.0.0.1/6379) 2>/dev/null || {
+                          echo "::error::job-local redis-server not healthy after 10s (PLAT-5343)"
+                          exit 1
+                        }
+                        cd /workspace/src
+                        # Bootstrap the exact Dockerfile uv binary from the in-cluster
+                        # GHCR mirror. PyPI's large uv index can be stale/incomplete in
+                        # the pull-through cache, and public wheel downloads flake.
+                        case "\$(dpkg --print-architecture)" in
+                          amd64) UV_LAYER=sha256:a401c7628376e8180f9ffe67d26420e82f35ebfd6e50ef404b8530c8066a4dd0 ;;
+                          arm64) UV_LAYER=sha256:76772b95e73ee83cfedfafb4d4d535ad44f7a523150e95eea08f49dcba9098c5 ;;
+                          *) echo "unsupported architecture" >&2; exit 64 ;;
+                        esac
+                        curl -fsS --retry 5 --retry-all-errors --connect-timeout 10 --max-time 300 \
+                          "http://mirror-ghcr.registry.svc.cluster.local:5000/v2/astral-sh/uv/blobs/\${UV_LAYER}" \
+                          | tar -xz -C /usr/local/bin
+                        uv --version | grep -Eq '^uv 0\.11\.26([[:space:]]|$)'
+                        UV_CACHE_DIR=/tmp/uv-cache uv lock --check
+                        # A frozen uv sync downloads the artifact URLs embedded in
+                        # uv.lock (files.pythonhosted.org), bypassing --index-url and
+                        # the in-cluster wheel cache. Export the same committed lock
+                        # to a hash-pinned requirements set, then sync that set via
+                        # the cache so every wheel follows its rewritten /files URL.
+                        uv export --frozen --no-dev --no-emit-project \
+                          --format requirements.txt --output-file /tmp/ci-requirements.txt
+                        uv venv --python python3 /workspace/src/.venv
+                        UV_CACHE_DIR=/tmp/uv-cache UV_HTTP_TIMEOUT=60 UV_HTTP_RETRIES=10 UV_CONCURRENT_DOWNLOADS=4 uv pip sync \
+                          --python /workspace/src/.venv/bin/python --require-hashes \
+                          /tmp/ci-requirements.txt \
+                          --index-url http://pip-cache.registry.svc.cluster.local/simple \
+                          --allow-insecure-host pip-cache.registry.svc.cluster.local
+                        # Django's multiprocessing runner needs tblib to return
+                        # worker tracebacks. Pin the long-cooled, dependency-free
+                        # helper and install it through the same cluster cache.
+                        UV_CACHE_DIR=/tmp/uv-cache UV_HTTP_TIMEOUT=300 uv pip install \
+                          --python /workspace/src/.venv/bin/python --no-deps 'tblib==1.7.0' \
+                          --index-url http://pip-cache.registry.svc.cluster.local/simple \
+                          --allow-insecure-host pip-cache.registry.svc.cluster.local
+                        export PATH="/workspace/src/.venv/bin:${PATH}"
+                        export POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5432 POSTGRES_USER=postgres POSTGRES_PASSWORD=postgres POSTGRES_DB=shizuha_pulse_ci
+                        python scripts/check_hermetic_settings.py --self-test
+                        python scripts/check_hermetic_settings.py --settings-module taskmanager.test_settings --workflow .forgejo/workflows/deploy.yml
+                        # CELERY_BROKER_URL must point at the job-local redis: settings default
+                        # is localhost:7379 (nonexistent here) and every Item.save() post_save
+                        # signal opens a TimerManager redis connection — thousands of saves x
+                        # connection-retry latency pushed the suite past the 30min gate timeout
+                        # (PLS-207 audit, 2026-07-02).
+                        export REDIS_URL=redis://127.0.0.1:6379/5 CACHE_REDIS_URL=redis://127.0.0.1:6379/6 CELERY_BROKER_URL=redis://127.0.0.1:6379/7 CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/7 DEBUG=True SECRET_KEY=ci-secret JWT_SECRET_KEY=ci-secret SHIZUHA_JWT_SIGNING_KEY=ci-secret PULSE_SUBSTRATE_CAP_MODE=off
+                        # SCLI-376: token revocation is consulted for EVERY token type
+                        # (fail closed). The test Job has no shizuha-id deployment, so a
+                        # real consult to the default http://shizuha-id:8001 would fail
+                        # DNS and fail closed (false "revoked") on every valid token,
+                        # turning the whole suite into 401s. Stand up a local stub that
+                        # answers with the exact revocation-status contract
+                        # ({"active": true}) and point SHIZUHA_EXPECTED_ISSUER at it, so
+                        # the consult genuinely runs and returns active for test tokens.
+                        mkdir -p /tmp/revocation-stub
+                        cat > /tmp/revocation-stub/server.py <<'PY'
+                        import json
+                        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+                        class H(BaseHTTPRequestHandler):
+                            def do_POST(self):
+                                length = int(self.headers.get("Content-Length") or 0)
+                                self.rfile.read(length)
+                                body = json.dumps({"active": True}).encode()
+                                self.send_response(200)
+                                self.send_header("Content-Type", "application/json")
+                                self.send_header("Content-Length", str(len(body)))
+                                self.end_headers()
+                                self.wfile.write(body)
+                            def log_message(self, *args):
+                                pass
+
+                        HTTPServer(("127.0.0.1", 19999), H).serve_forever()
+                        PY
+                        python3 /tmp/revocation-stub/server.py &
+                        REVOCATION_STUB_PID=\$!
+                        trap 'kill \${REVOCATION_STUB_PID} >/dev/null 2>&1 || true' EXIT
+                        for i in \$(seq 1 10); do
+                          if curl -fsS -X POST -d '{}' http://127.0.0.1:19999/api/oauth/revocation-status >/dev/null 2>&1; then break; fi
+                          sleep 1
+                        done
+                        # PLAT-6961 regression guard: the stub must answer the exact
+                        # revocation-status contract ({"active": true}), not merely any
+                        # HTTP 200 — a stub that returns a wrong body would silently
+                        # re-break every authenticated test with a false "revoked".
+                        STUB_BODY=\$(curl -fsS -X POST -d '{}' http://127.0.0.1:19999/api/oauth/revocation-status)
+                        if [ "\${STUB_BODY}" != '{"active": true}' ]; then
+                          echo "revocation stub returned unexpected body: \${STUB_BODY}" >&2
+                          exit 1
+                        fi
+                        export SHIZUHA_EXPECTED_ISSUER=http://127.0.0.1:19999
+                        # PLS-229: scope discovery to the \`tasks\` app (the only Django app;
+                        # all real backend tests live under tasks/). Default \`manage.py test\`
+                        # discovery starts at repo root and collects invalid root scripts —
+                        # test_quickrem.py (a shell command saved as .py -> SyntaxError) and
+                        # pytest-based test_plat419_*/test_plat855_* (pytest not in requirements
+                        # -> ModuleNotFoundError). Full non-failfast discovery then keeps running
+                        # after those import errors and OOMKills (137) at 16Gi BEFORE printing the
+                        # unittest summary, masking the real failures. Scoping + --failfast makes
+                        # the gate fail fast with a visible failure instead of an OOM.
+                        # ORIG-11: cap glibc malloc arenas. The suite spawns many threads
+                        # (urllib3 connection pools — user_service/notifications retry the
+                        # :9 discard sentinel), and glibc allocates up to 8*ncpu 64MB arenas,
+                        # one per thread, inflating RSS by GBs on the many-core GB10 nodes.
+                        # MALLOC_ARENA_MAX=2 collapses that phantom RSS with no test impact.
+                        export MALLOC_ARENA_MAX=2
+                        # PLAT-4196: Pulse is multi-tenant org/user data, not an
+                        # "internal-only" exception.  Run the static authz-scope
+                        # invariant and the exact incident boundary first so a
+                        # tenant leak fails fast with a useful signal.  The full
+                        # suite below remains the broader deploy gate.
+                        python -m unittest -q \
+                          test_scripts.test_check_drf_authz_scope \
+                          test_scripts.test_live_pulse_tenant_isolation_probe
+                        python scripts/check_drf_authz_scope.py
+                        # PLS-723: same two-phase contract as the main suite — on red,
+                        # re-run WITHOUT --failfast so every tenant-leak failure is
+                        # reported, not just the first one.
+                        python manage.py test --settings=taskmanager.test_settings \
+                          tasks.tests.test_plat4196_tenant_isolation_gate \
+                          tasks.tests.test_plat4195_cross_tenant_idor \
+                          tasks.tests.test_plat4195_bulk_mutation_authorization \
+                          tasks.tests.test_plat4195_child_mutation_authz \
+                          --noinput --failfast --keepdb || {
+                            echo "=== tenant-isolation gate FAILED with --failfast; re-running WITHOUT --failfast to report the full failure set (PLS-723) ==="
+                            python manage.py test --settings=taskmanager.test_settings \
+                              tasks.tests.test_plat4196_tenant_isolation_gate \
+                              tasks.tests.test_plat4195_cross_tenant_idor \
+                              tasks.tests.test_plat4195_bulk_mutation_authorization \
+                              tasks.tests.test_plat4195_child_mutation_authz \
+                              --noinput --keepdb
+                            exit 1
+                          }
+                        # --keepdb: teardown destroy_test_db races with leftover connections
+                        # (OperationalError: test DB accessed by other users) and fails the
+                        # Job after the suite already printed OK — blocking pulse API deploy.
+                        # Match the mandatory local gate's proven worker budget. The suite has
+                        # grown to ~2,000 tests; serial execution occupies a general runner for
+                        # 17-20 minutes while eight isolated Django DB clones finish in ~25s.
+                        # The pinned tblib bootstrap above keeps worker tracebacks intact.
+                        export TEST_JOBS=8
+                        python tests/test_explicit_credential_configuration.py
+                        python manage.py check --settings=taskmanager.test_settings
+                        python manage.py makemigrations --check --dry-run \
+                          --settings=taskmanager.test_settings
+                        # PLS-723: --failfast stops at the FIRST failure, so a red log reports
+                        # failures=1 regardless of how many tests actually broke — authors read
+                        # that as "one root cause" and fix one-per-ring (the 2026-07-27 incident:
+                        # one predicate change broke 3 fixtures, but each red run showed 1).
+                        # Two-phase: --failfast gives the fast verdict on green; on red we
+                        # re-run WITHOUT --failfast so the log reports EVERY failing test in the
+                        # affected scope before exiting nonzero. The re-run keeps --parallel and
+                        # --keepdb so it stays inside the pod's worker/OOM budget.
+                        # PLAT-9505 / run 8018: manage.py can print OK and then
+                        # exit 1 during keepdb/parallel teardown. The two-phase
+                        # or-block shape stays (PLS-723). A leading OK summary
+                        # inside that block is the gate verdict and exits 0
+                        # before the full re-run. A real failure has no OK line,
+                        # re-runs without --failfast, and exits 1.
+                        python manage.py test tasks --settings=taskmanager.test_settings \
+                          --noinput --failfast --keepdb --parallel "\${TEST_JOBS}" \
+                          > /tmp/pulse-suite.log 2>&1 || {
+                            cat /tmp/pulse-suite.log
+                            if grep -q '^OK' /tmp/pulse-suite.log; then
+                              echo "backend suite printed OK; ignoring post-OK teardown exit"
+                              exit 0
+                            fi
+                            echo "=== premerge FAILED with --failfast; re-running WITHOUT --failfast to report the full failure set (PLS-723) ==="
+                            python manage.py test tasks --settings=taskmanager.test_settings \
+                              --noinput --keepdb --parallel "\${TEST_JOBS}"
+                            exit 1
+                          }
+                        cat /tmp/pulse-suite.log
+                        exit 0
+                    # PLS-209: 1061 tests + pg + redis in one pod; without a request the
+                    # pod lands on a pressured node and gets SIGKILLed (exit 137).
+                    # PLAT-1219 follow-up: 6Gi limit still OOMKilled (run 1154, node at 12%
+                    # memory) — apt/pip page cache + emptyDir dirty pages + pg + suite all
+                    # count against the one cgroup. GB10 nodes have 119Gi; 16Gi is cheap.
+                    # ORIG-11: the growing suite (id-39 consumer, PLS-230, +others) OOMKilled
+                    # at 16Gi (runs 1237/prev) — bumped to 24Gi + MALLOC_ARENA_MAX=2 above.
+                    resources:
+                      requests: { memory: 6Gi, cpu: "1" }
+                      limits: { memory: 24Gi }
+                    volumeMounts: [{ mountPath: /workspace, name: workspace }]
+                volumes: [{ emptyDir: {}, name: workspace }]
+          YAML
+
+          # PLS-207/PLAT-1219: `kubectl wait --for=condition=complete` NEVER returns on a
+          # FAILED job — a failing suite hung the gate for the full 30min while the job's
+          # ttlSecondsAfterFinished reaped it, so the log dump hit NotFound and the actual
+          # test failures were unrecoverable. Poll for Complete OR Failed instead, and dump
+          # the suite output while the pod still exists.
+          DEADLINE=$(( $(date +%s) + 1800 ))
+          # PLAT-8402: a bare tail=300 hides post-OK teardown failures — an
+          # OOMKill/eviction during teardown produces no stderr at all, so the
+          # only evidence is the pod's container status (reason/exitCode).
+          # Dump job+pod status alongside the log tail, and distinguish a
+          # suite that already printed OK (PLS-207/PLAT-1219 teardown class)
+          # from a genuinely red suite.
+          dump_gate_evidence() {
+            echo "=== gate evidence: job status ==="
+            kubectl get job -n build "${JOB}" -o jsonpath='{.status}' 2>/dev/null || true
+            echo
+            echo "=== gate evidence: pod container statuses ==="
+            kubectl get pods -n build -l "job-name=${JOB}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{range .status.initContainerStatuses[*]}  init={.name} reason={.state.terminated.reason} exitCode={.state.terminated.exitCode}{"\n"}{end}{range .status.containerStatuses[*]}  main={.name} reason={.state.terminated.reason} exitCode={.state.terminated.exitCode} message={.state.terminated.message}{"\n"}{end}{"\n"}{end}' 2>/dev/null || true
+            echo "=== gate evidence: last stderr (tail=300) ==="
+            kubectl logs -n build "job/${JOB}" --all-containers --tail=300 || true
+          }
+          while true; do
+            COMPLETE="$(kubectl get job -n build "${JOB}" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || true)"
+            FAILED="$(kubectl get job -n build "${JOB}" -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)"
+            [ "${COMPLETE}" = "True" ] && break
+            if [ "${FAILED}" = "True" ]; then
+              LOGS="$(kubectl logs -n build "job/${JOB}" --all-containers --tail=800 || true)"
+              # PLAT-9513: --tail=300 clipped the failing shard's summary out of the
+              # alert payload (three red runs produced zero failing test names in the
+              # alert). 800 lines keeps the per-shard summaries reachable.
+              if printf '%s\n' "${LOGS}" | grep -q '^OK'; then
+                echo "::error::backend suite printed OK but the test Job Failed — post-OK teardown/exit failure (PLS-207/PLAT-1219 class), not a red suite; container status below carries the exit reason"
+              else
+                echo "::error::backend test gate failed — suite output follows"
+              fi
+              printf '%s\n' "${LOGS}"
+              dump_gate_evidence
+              exit 1
+            fi
+            if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
+              echo "::error::backend test gate timed out after 1800s"
+              dump_gate_evidence
+              exit 1
+            fi
+            sleep 10
+          done
+
+          kubectl logs -n build "job/${JOB}" --all-containers --tail=120 || true
+  # Build+push the multi-arch image CONCURRENTLY with the test gate. Only the
+  # deploy job below gates the rollout on BOTH test AND build, so the long kaniko
+  # build no longer waits serially behind the Django suite.
+  build:
+    # PLS-1018: skip fork-PR push-event runs (no secrets) so they cannot report
+    # a failing status that overrides the green pull_request run.
+    if: github.event_name != 'push' || !startsWith(github.ref, 'refs/pull/')
+    runs-on: deploy-lane
+    container:
+      image: registry.registry.svc.cluster.local:5000/origin-ci-helm@sha256:90f02d48d68c0ed690f9ddd8bcef1167490610362c19d429943931433ed7b194
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install kubectl + cluster access
+        run: |
+          set -euo pipefail
+          # Pinned toolbox vendors the client; do not download it per job.
+          kubectl version --client -o json | python3 -c 'import json,sys; assert json.load(sys.stdin)["clientVersion"]["gitVersion"].split("+")[0] == "v1.34.6"'
+          helm version --short | grep -F 'v3.21.2'
+          mkdir -p "$HOME/.kube"
+          printf '%s' "${{ secrets.KUBE_CONFIG_B64 }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+      - name: Multi-arch build + verify
+        run: |
+          set -euo pipefail
+          SHORT="$(echo "${{ github.sha }}" | cut -c1-7)"
+          TAG="shizuha-tasks-${SHORT}"
+          REG="registry.registry.svc.cluster.local:5000"
+          NPM_CONFIG_REGISTRY="${NPM_CONFIG_REGISTRY:-http://npm-cache.registry.svc.cluster.local:4873/}"
+          PIP_INDEX_URL="${PIP_INDEX_URL:-http://pip-cache.registry.svc.cluster.local/simple/}"
+          PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST:-pip-cache.registry.svc.cluster.local}"
+          echo "Multi-arch build shizuha-pulse:${TAG} (amd64 + arm64)"
+
+          render_build_job() {  # $1=arch
+            local ARCH="$1"
+            cat <<YAML
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ci-build-shizuha-pulse-${SHORT}-${ARCH}
+            namespace: build
+            labels:
+              app: ci-build
+              shizuha.io/orig-task: ORIG-7
+              shizuha.io/build-owner: pulse-backend
+              shizuha.io/source-sha: "${SHORT}"
+              shizuha.io/build-arch: "${ARCH}"
+          spec:
+            backoffLimit: 0
+            # The runner's wait is 30m; reap a build that outlives that owner so
+            # a cancelled/failed workflow cannot consume an architecture lane
+            # indefinitely when no successor arrives to perform cleanup.
+            activeDeadlineSeconds: 2100
+            ttlSecondsAfterFinished: 300
+            template:
+              spec:
+                restartPolicy: Never
+                nodeSelector: { kubernetes.io/arch: ${ARCH} }
+                tolerations:
+                  - { key: node.shizuha/workstation, operator: Exists, effect: NoSchedule }
+                  - { key: shizuha.com/inference-paused, operator: Exists, effect: NoSchedule }
+                  # amd64 kaniko on i9-ws times out pushing to registry ClusterIP;
+                  # s1 overlay works and carries operator=unschedulable. CI tolerates
+                  # the operator-hold taint instead of removing it.
+                  - { key: operator, operator: Equal, value: unschedulable, effect: NoSchedule }
+                affinity:
+                  nodeAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                      nodeSelectorTerms:
+                      - matchExpressions:
+                        - { key: node-role.kubernetes.io/control-plane, operator: DoesNotExist }
+                        # PLAT-7268: i9-ws (100.64.0.23) has a known flannel/containerd
+                        # pod-network issue — pods there cannot reach the apiserver and
+                        # the apiserver cannot proxy to its kubelet (502), so the amd64
+                        # kaniko build fails when it lands on i9-ws. Exclude it from the
+                        # build lanes (same durable pattern as registry canary PR #837).
+                        - { key: kubernetes.io/hostname, operator: NotIn, values: [i9-ws] }
+                initContainers:
+                  - name: git-clone
+                    image: alpine/git:2.43.0
+                    command: ["/bin/sh","-c"]
+                    args:
+                      - |
+                        set -euo pipefail
+                        SOURCE_URL="\${GIT_SOURCE_URL:-}"
+                        SOURCE_SHA="\${GIT_SOURCE_SHA:-}"
+                        [ -n "\${SOURCE_URL}" ] && [ "\${SOURCE_URL}" != "<no value>" ] || SOURCE_URL="http://forgejo-http.origin.svc.cluster.local/${{ github.repository }}.git"
+                        [ -n "\${SOURCE_SHA}" ] && [ "\${SOURCE_SHA}" != "<no value>" ] || SOURCE_SHA="${{ github.sha }}"
+                        case "\${SOURCE_URL}" in
+                          http://forgejo-http.origin.svc.cluster.local/*) AUTH_URL="http://x-token-auth:\${GIT_PASSWORD}@forgejo-http.origin.svc.cluster.local/\${SOURCE_URL#http://forgejo-http.origin.svc.cluster.local/}" ;;
+                          https://origin.shizuha.com/*) AUTH_URL="http://x-token-auth:\${GIT_PASSWORD}@forgejo-http.origin.svc.cluster.local/\${SOURCE_URL#https://origin.shizuha.com/}" ;;
+                          *) echo "refusing non-Origin source URL: \${SOURCE_URL}" >&2; exit 64 ;;
+                        esac
+                        git init /workspace/src
+                        cd /workspace/src
+                        git remote add origin "\${AUTH_URL}"
+                        git fetch --depth=1 origin "\${SOURCE_SHA}"
+                        git checkout --detach FETCH_HEAD
+                        # This script is embedded in an unquoted outer heredoc; escape
+                        # command substitution so the in-pod shell (not the Origin
+                        # runner) evaluates it. Otherwise push builds render this as
+                        # \`test "" = "\${SOURCE_SHA}"\` and the init container fails.
+                        test "\$(git rev-parse HEAD)" = "\${SOURCE_SHA}"
+                        if [ -f /workspace/src/Dockerfile ]; then
+                          awk '''
+                            /^FROM[[:space:]]/ {
+                              print
+                              print "ARG NPM_CONFIG_REGISTRY=http://npm-cache.registry.svc.cluster.local:4873/"
+                              print "ARG PIP_INDEX_URL=http://pip-cache.registry.svc.cluster.local/simple/"
+                              print "ARG PIP_TRUSTED_HOST=pip-cache.registry.svc.cluster.local"
+                              print "ENV NPM_CONFIG_REGISTRY=${NPM_CONFIG_REGISTRY}"
+                              print "ENV PIP_INDEX_URL=${PIP_INDEX_URL}"
+                              print "ENV PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST}"
+                              # NB: do NOT point uv at pip-cache. The mirror does not serve
+                              # the upload-time metadata that pyproject exclude-newer
+                              # (PLAT-1611 cooldown) needs, so \`uv sync --locked\` resolves
+                              # differently than the pypi-generated lock and every image
+                              # build fails "lockfile needs to be updated" (proven by A/B
+                              # against the same tree, 2026-07-04). uv talks to pypi directly.
+                              next
+                            }
+                            { print }
+                          ''' /workspace/src/Dockerfile > /workspace/src/Dockerfile.cache-wired
+                          mv /workspace/src/Dockerfile.cache-wired /workspace/src/Dockerfile
+                        fi
+                    env:
+                      - name: GIT_PASSWORD
+                        valueFrom: { secretKeyRef: { name: forgejo-token, key: password } }
+                      - name: GIT_SOURCE_URL
+                        value: "${{ github.event.pull_request.head.repo.clone_url }}"
+                      - name: GIT_SOURCE_SHA
+                        value: "${{ github.event.pull_request.head.sha }}"
+                    volumeMounts: [{ mountPath: /workspace, name: workspace }]
+                containers:
+                  - name: kaniko
+                    image: gcr.io/kaniko-project/executor:v1.23.2
+                    args:
+                      - --context=dir:///workspace/src
+                      - --dockerfile=/workspace/src/Dockerfile
+                      - --destination=${REG}/shizuha-pulse:${TAG}-${ARCH}
+                      - --insecure
+                      - --skip-tls-verify
+                      - --insecure-pull
+                      - --registry-mirror=mirror-dockerhub.registry.svc.cluster.local:5000
+                      # --registry-mirror only covers Docker Hub; the Dockerfile also pulls
+                      # ghcr.io/astral-sh/uv (kaniko fetched it direct + flaked 2026-07-12).
+                      # Map ghcr.io to the in-cluster pull-through proxy so it cannot flake.
+                      - --registry-map=ghcr.io=mirror-ghcr.registry.svc.cluster.local:5000
+                      - --build-arg=NPM_CONFIG_REGISTRY=http://npm-cache.registry.svc.cluster.local:4873/
+                      - --build-arg=PIP_INDEX_URL=http://pip-cache.registry.svc.cluster.local/simple/
+                      - --build-arg=PIP_TRUSTED_HOST=pip-cache.registry.svc.cluster.local
+                      - --cache=true
+                      - --cache-repo=${REG}/kaniko-cache/pulse-deploy-${ARCH}
+                      - --cache-copy-layers=true
+                      - --cache-ttl=336h
+                      - --compressed-caching=false
+                      - --cleanup
+                    volumeMounts: [{ mountPath: /workspace, name: workspace }]
+                volumes: [{ emptyDir: {}, name: workspace }]
+          YAML
+          }
+
+          # A superseded Forgejo run cannot clean up an in-cluster Job after its
+          # runner container is cancelled. Remove only exact Pulse backend build
+          # names from older revisions before launching this one; otherwise a
+          # burst of commits leaves several obsolete amd64 Kaniko writers on s1
+          # and can starve containerd itself. The anchored regex deliberately
+          # excludes the independently owned pulse-frontend Jobs.
+          while read -r JOB_RESOURCE; do
+            JOB_NAME="${JOB_RESOURCE#job.batch/}"
+            if [[ "${JOB_NAME}" =~ ^ci-build-shizuha-pulse-([0-9a-f]{7})-(amd64|arm64)$ ]] \
+              && [ "${BASH_REMATCH[1]}" != "${SHORT}" ]; then
+              echo "Removing superseded Pulse backend build ${JOB_NAME}"
+              kubectl delete job -n build "${JOB_NAME}" --wait=false
+            fi
+          done < <(kubectl get jobs -n build -o name)
+
+          # Launch both arch builds in parallel. Delete same-SHA leftovers first so reruns
+          # after a failed Job create fresh pods instead of waiting on an unchanged dead Job.
+          for ARCH in amd64 arm64; do
+            kubectl delete job -n build "ci-build-shizuha-pulse-${SHORT}-${ARCH}" --ignore-not-found
+          done
+          render_build_job amd64 | kubectl apply -f -
+          render_build_job arm64 | kubectl apply -f -
+
+          # PLS-207/PLAT-1219: `kubectl wait --for=condition=complete` NEVER returns on a
+          # FAILED job — a failed kaniko build hung the deploy for 1.5h+ (PLAT-6970) while
+          # the job's ttlSecondsAfterFinished reaped it, so `{.status.failed}` was empty
+          # (NotFound) and neither the wait nor the failure poll ever fired. Poll for
+          # Complete OR Failed instead, treat a reaped (NotFound) job as failure, and dump
+          # the kaniko log while the pod still exists.
+          wait_job() {  # $1=arch
+            local J="ci-build-shizuha-pulse-${SHORT}-$1"
+            local DEADLINE=$(( $(date +%s) + 1800 ))
+            while true; do
+              COMPLETE="$(kubectl get job -n build "${J}" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || true)"
+              FAILED="$(kubectl get job -n build "${J}" -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)"
+              [ "${COMPLETE}" = "True" ] && break
+              if [ "${FAILED}" = "True" ]; then
+                echo "::error::kaniko $1 build failed"
+                kubectl logs -n build "job/${J}" --all-containers --tail=40 || true
+                exit 1
+              fi
+              if [ -z "${COMPLETE}" ] && [ -z "${FAILED}" ] \
+                && ! kubectl get job -n build "${J}" >/dev/null 2>&1; then
+                echo "::error::kaniko $1 build job ${J} was reaped (NotFound) before completion"
+                exit 1
+              fi
+              if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
+                echo "::error::kaniko $1 build timed out after 1800s"
+                kubectl logs -n build "job/${J}" --all-containers --tail=40 || true
+                exit 1
+              fi
+              sleep 10
+            done
+          }
+          wait_job amd64 &
+          AMD64_WAIT_PID=$!
+          wait_job arm64 &
+          ARM64_WAIT_PID=$!
+          WAIT_STATUS=0
+          wait "$AMD64_WAIT_PID" || WAIT_STATUS=$?
+          wait "$ARM64_WAIT_PID" || WAIT_STATUS=$?
+          [ "$WAIT_STATUS" -eq 0 ] || exit "$WAIT_STATUS"
+          echo "Both arch builds done."
+
+          # Combine into a multi-arch manifest list with crane
+          kubectl delete job -n build "ci-manifest-shizuha-pulse-${SHORT}" --ignore-not-found
+          cat <<YAML | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ci-manifest-shizuha-pulse-${SHORT}
+            namespace: build
+            labels: { app: ci-manifest, shizuha.io/orig-task: ORIG-7 }
+          spec:
+            backoffLimit: 0
+            ttlSecondsAfterFinished: 300
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: crane
+                    image: gcr.io/go-containerregistry/crane:latest
+                    # Image entrypoint IS the crane binary (distroless, no shell) — pass args directly.
+                    args:
+                      - index
+                      - append
+                      - --insecure
+                      - -t
+                      - ${REG}/shizuha-pulse:${TAG}
+                      - -m
+                      - ${REG}/shizuha-pulse:${TAG}-amd64
+                      - -m
+                      - ${REG}/shizuha-pulse:${TAG}-arm64
+          YAML
+          kubectl wait -n build --for=condition=complete "job/ci-manifest-shizuha-pulse-${SHORT}" --timeout=300s || {
+            echo "::error::manifest combine failed"; kubectl logs -n build "job/ci-manifest-shizuha-pulse-${SHORT}" --tail=30 || true; exit 1; }
+
+          # Deploy the multi-arch manifest list
+          verify_manifest() {
+            local REPO="$1"
+            local IMAGE_TAG="$2"
+            local JOB="ci-verify-${REPO}-${SHORT}"
+            kubectl delete job -n build "${JOB}" --ignore-not-found
+            cat <<YAML | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${JOB}
+            namespace: build
+            labels: { app: ci-verify, service: ${REPO} }
+          spec:
+            backoffLimit: 0
+            ttlSecondsAfterFinished: 300
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: manifest-check
+                    image: python:3.12-alpine
+                    command: ["python", "-c"]
+                    args:
+                      - |
+                        import json, urllib.request
+                        url = "http://${REG}/v2/${REPO}/manifests/${IMAGE_TAG}"
+                        accept = ",".join([
+                            "application/vnd.oci.image.index.v1+json",
+                            "application/vnd.docker.distribution.manifest.list.v2+json",
+                        ])
+                        req = urllib.request.Request(url, headers={"Accept": accept})
+                        with urllib.request.urlopen(req, timeout=30) as resp:
+                            manifest = json.load(resp)
+                        platforms = {
+                            f"{m.get('platform', {}).get('os')}/{m.get('platform', {}).get('architecture')}"
+                            for m in manifest.get("manifests", [])
+                        }
+                        missing = {"linux/amd64", "linux/arm64"} - platforms
+                        print(f"{url} platforms={sorted(platforms)}")
+                        if missing:
+                            raise SystemExit(f"missing required platform(s): {sorted(missing)}")
+          YAML
+            kubectl wait -n build --for=condition=complete "job/${JOB}" --timeout=120s || {
+              echo "::error::manifest verification failed"
+              kubectl logs -n build "job/${JOB}" --tail=80 || true
+              exit 1
+            }
+            kubectl logs -n build "job/${JOB}" --tail=20 || true
+          }
+          verify_manifest "shizuha-pulse" "${TAG}"
+
+  # Rollout gate: depends on BOTH test AND build. Neither a red suite nor a
+  # failed build can reach the cluster, but they now run in parallel instead of
+  # build waiting behind the test gate.
+  deploy:
+    # PLS-1018: skip fork-PR push-event runs (no secrets) so they cannot report
+    # a failing status that overrides the green pull_request run.
+    if: github.event_name != 'push' || !startsWith(github.ref, 'refs/pull/')
+    needs: [test, build]
+    concurrency:
+      group: deploy-shizuha-pulse-build-${{ github.ref }}
+      cancel-in-progress: true
+    runs-on: deploy-lane
+    container:
+      image: registry.registry.svc.cluster.local:5000/origin-ci-helm@sha256:90f02d48d68c0ed690f9ddd8bcef1167490610362c19d429943931433ed7b194
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install kubectl + cluster access
+        run: |
+          set -euo pipefail
+          # Pinned toolbox vendors the client; do not download it per job.
+          kubectl version --client -o json | python3 -c 'import json,sys; assert json.load(sys.stdin)["clientVersion"]["gitVersion"].split("+")[0] == "v1.34.6"'
+          helm version --short | grep -F 'v3.21.2'
+          mkdir -p "$HOME/.kube"
+          printf '%s' "${{ secrets.KUBE_CONFIG_B64 }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+      - name: Materialize exact promotion helpers
+        run: |
+          set -euo pipefail
+          # Deploy-lane checkout has historically produced an empty workspace.
+          # Fetch the helper and contract inputs from the exact event revision.
+          SRC_DIR="$(mktemp -d /tmp/pulse-promotion-src.XXXXXX)"
+          trap 'rm -rf "${SRC_DIR}"' EXIT
+          GIT_TOKEN='${{ secrets.CI_PACKAGE_TOKEN }}'
+          AUTH="$(printf 'x-token-auth:%s' "${GIT_TOKEN}" | base64 | tr -d '\n')"
+          git -C "${SRC_DIR}" init
+          git -C "${SRC_DIR}" remote add origin http://forgejo-http.origin.svc.cluster.local/${{ github.repository }}.git
+          git -C "${SRC_DIR}" -c http.extraHeader="Authorization: Basic ${AUTH}" \
+            fetch --depth=1 origin '${{ github.sha }}'
+          git -C "${SRC_DIR}" checkout --detach FETCH_HEAD
+          test "$(git -C "${SRC_DIR}" rev-parse HEAD)" = '${{ github.sha }}'
+          mkdir -p .forgejo/scripts .forgejo/workflows
+          install -m 0644 "${SRC_DIR}/.forgejo/scripts/deploy-values-path.py" .forgejo/scripts/deploy-values-path.py
+          install -m 0644 "${SRC_DIR}/.forgejo/scripts/test_deploy_values_path.py" .forgejo/scripts/test_deploy_values_path.py
+          install -m 0644 "${SRC_DIR}/.forgejo/scripts/exact-deployment-pods.py" .forgejo/scripts/exact-deployment-pods.py
+          install -m 0644 "${SRC_DIR}/.forgejo/scripts/test_exact_deployment_pods.py" .forgejo/scripts/test_exact_deployment_pods.py
+          install -m 0644 "${SRC_DIR}/.forgejo/scripts/extract_tracking_key.py" .forgejo/scripts/extract_tracking_key.py
+          # PLS-1320: the DeploymentEvent recorder is called via the
+          # workspace-relative path by the dispatched-Job emitter, but the
+          # historically-empty checkout never has it on disk — materialize it
+          # with the other promotion helpers (0755 preserves executability;
+          # the tree blob is 100755). Run 7024 (02:14Z) executed the emitter
+          # in exactly this gap: script tracked in the git tree, absent on
+          # disk → "No such file or directory" → no DeploymentEvent.
+          install -m 0755 "${SRC_DIR}/.forgejo/scripts/record-deployment-event.sh" .forgejo/scripts/record-deployment-event.sh
+          install -m 0644 "${SRC_DIR}/.forgejo/workflows/deploy.yml" .forgejo/workflows/deploy.yml
+          install -m 0644 "${SRC_DIR}/.forgejo/workflows/deploy-frontend.yml" .forgejo/workflows/deploy-frontend.yml
+          python3 .forgejo/scripts/test_deploy_values_path.py
+          python3 .forgejo/scripts/test_exact_deployment_pods.py
+      - name: Deploy multi-arch image + verify
+        run: |
+          set -euo pipefail
+          SHORT="$(echo "${{ github.sha }}" | cut -c1-7)"
+          TAG="shizuha-tasks-${SHORT}"
+          REG="registry.registry.svc.cluster.local:5000"
+
+          install_helm() {
+            if command -v helm >/dev/null 2>&1; then return; fi
+            local HARCH HELM_SHA
+            HARCH="$(uname -m)"; case "${HARCH}" in x86_64) HARCH=amd64;; aarch64|arm64) HARCH=arm64;; esac
+            case "${HARCH}" in
+              amd64) HELM_SHA=fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179 ;;
+              arm64) HELM_SHA=d3f8f15b3d9ec8c8678fbf3280c3e5902efabe5912e2f9fcf29107efbc8ead69 ;;
+              *) echo "Unsupported helm arch: ${HARCH}" >&2; return 1 ;;
+            esac
+            curl -fsSL -o /tmp/helm.tgz \
+              "https://origin.shizuha.com/api/packages/actions/generic/helm/v3.16.4/helm-v3.16.4-linux-${HARCH}.tar.gz"
+            echo "${HELM_SHA}  /tmp/helm.tgz" | sha256sum -c -
+            tar xzf /tmp/helm.tgz -C /tmp
+            install -m 0755 "/tmp/linux-${HARCH}/helm" /usr/local/bin/helm
+          }
+          install_helm
+
+          deploy_values_api() {
+            # PLAT-4689: DNS + Host header (raw ClusterIP → HTML 403 on private Contents API)
+            FGJO_URL="http://forgejo-http.origin.svc.cluster.local"
+            FGJO_HOST_HEADER="origin.shizuha.com"
+            VALS_PATH="k3s%2Fcharts%2Fshizuha-pulse%2Fvalues.yaml"
+          }
+
+          # PLAT-4689: never use curl -sf + stdout discard on deploy Contents API.
+          forgejo_contents_curl() {
+            local accepted_codes='^(200|201)$'
+            if [ "${1:-}" = "--accept-codes" ]; then
+              accepted_codes="$2"
+              shift 2
+            fi
+            local method="$1"; shift
+            local url="$1"; shift
+            local code body_file
+            body_file="$(mktemp /tmp/fgjo-http-body.XXXXXX)"
+            code="$(
+              curl -sS -o "${body_file}" -w '%{http_code}' \
+                -X "${method}" \
+                -H "Host: ${FGJO_HOST_HEADER:-origin.shizuha.com}" \
+                -H "Authorization: token ${{ secrets.DEPLOY_PUSH_TOKEN }}" \
+                -H "Content-Type: application/json" \
+                "$@" \
+                "${url}" || true
+            )"
+            FGJO_HTTP_CODE="${code}"
+            FGJO_HTTP_BODY_FILE="${body_file}"
+            if ! printf '%s' "${code}" | grep -Eq "${accepted_codes}"; then
+              echo "::error::deploy contents ${method} HTTP ${code} url=${url}" >&2
+              python3 - "${body_file}" <<'PYRED' || true
+          import json, re, sys
+          path = sys.argv[1]
+          raw = open(path, 'rb').read()[:4000]
+          text = raw.decode('utf-8', 'replace')
+          text = re.sub(r'(?i)(token\s+)[0-9a-f]{20,}', r'\1[REDACTED]', text)
+          try:
+              obj = json.loads(text)
+              print('body:', json.dumps(obj)[:1500])
+          except Exception:
+              print('body_raw:', text[:1500])
+          PYRED
+              rm -f "${body_file}"
+              return 22
+            fi
+            return 0
+          }
+
+          read_deploy_values_to() {
+            # $1 = destination file for Contents API JSON (never stdout via cmd-sub)
+            local dest="$1"
+            deploy_values_api
+            forgejo_contents_curl GET \
+              "${FGJO_URL}/api/v1/repos/shizuha-labs/deploy/contents/${VALS_PATH}" \
+              || return $?
+            cp "${FGJO_HTTP_BODY_FILE}" "${dest}"
+            rm -f "${FGJO_HTTP_BODY_FILE}"
+            FGJO_HTTP_BODY_FILE=""
+          }
+
+          update_deploy_values_backend_tag() {
+            local IMAGE_TAG="$1"
+            local FILE_SHA CURRENT_BACKEND_TAG NEW_B64 BODY
+            deploy_values_api
+            # Run 6100 (2026-09-12): 5 attempts x fixed 2s sleep exhausted under
+            # concurrent bump traffic (multiple deploy lanes bumping the deploy
+            # repo in the same window). Widen to 8 attempts with jittered
+            # backoff so colliding writers de-synchronize instead of retrying
+            # in lockstep. Semantics unchanged: 409 = retry, 200/201 = done.
+            for write_attempt in 1 2 3 4 5 6 7 8; do
+              read_deploy_values_to /tmp/pulse-deploy-values-resp.json
+              FILE_SHA="$(python3 -c 'import json; print(json.load(open("/tmp/pulse-deploy-values-resp.json"))["sha"])')"
+              python3 -c 'import base64,json; open("/tmp/values.yaml","wb").write(base64.b64decode(json.load(open("/tmp/pulse-deploy-values-resp.json"))["content"]))'
+              CURRENT_BACKEND_TAG="$(python3 .forgejo/scripts/deploy-values-path.py get /tmp/values.yaml image.tag)"
+              if [ "${CURRENT_BACKEND_TAG}" = "${IMAGE_TAG}" ]; then
+                echo "deploy repo already desires ${IMAGE_TAG}"
+                return 0
+              fi
+              python3 .forgejo/scripts/deploy-values-path.py set /tmp/values.yaml image.tag "${IMAGE_TAG}" >/dev/null
+              NEW_B64="$(base64 -w0 /tmp/values.yaml)"
+              # PLAT-10373: fleet deploy admission (PLAT-4862, fail closed) requires a
+              # Pulse key in the deploy commit message. Propagate the key from the
+              # pinned source commit (tag suffix = source SHA); fall back to the
+              # admission-conflict carrier so a pin never lands untracked.
+              PIN_SOURCE_SHA="${IMAGE_TAG##*-}"
+              forgejo_contents_curl --accept-codes '^(200)$' GET \
+                "${FGJO_URL}/api/v1/repos/shizuha-labs/pulse/git/commits/${PIN_SOURCE_SHA}" || true
+              # PLAT-10373 (rei review 5633): three-way contract — exit 0 = verified key
+              # (case-insensitive match, normalized uppercase, first-match primary);
+              # exit 3 = lookup/parse/provenance failure -> FAIL CLOSED (no untracked pin,
+              # no silent carrier substitution); exit 4 = verifiably keyless message ->
+              # carrier fallback is legitimate. Lowercase refs (pls-1349) normalize; slug
+              # fragments (pls1349-merge-correlation-pin) never match.
+              set +e
+              python3 .forgejo/scripts/extract_tracking_key.py --expect-sha "${PIN_SOURCE_SHA}" --file "${FGJO_HTTP_BODY_FILE}" > /tmp/pin-key.txt 2> /tmp/pin-key.err
+              PIN_EXTRACT_RC=$?
+              set -e
+              if [ "$PIN_EXTRACT_RC" -eq 0 ]; then
+                PIN_TRACKING_KEY="$(cat /tmp/pin-key.txt)"
+              elif [ "$PIN_EXTRACT_RC" -eq 4 ]; then
+                PIN_TRACKING_KEY="PLAT-10373"
+                echo "PLAT-10373: pinned source commit carries no tracking key; using carrier fallback"
+              else
+                cat /tmp/pin-key.err >&2 || true
+                echo "::error::PLAT-10373 provenance failure: tracking key could not be verified for source ${PIN_SOURCE_SHA}; failing closed (no untracked pin)"
+                rm -f "${FGJO_HTTP_BODY_FILE}" /tmp/pin-key.txt /tmp/pin-key.err; FGJO_HTTP_BODY_FILE=""
+                exit 1
+              fi
+              rm -f "${FGJO_HTTP_BODY_FILE}" /tmp/pin-key.txt /tmp/pin-key.err; FGJO_HTTP_BODY_FILE=""
+              BODY="$(python3 -c "import json,sys; print(json.dumps({'message':'ci(shizuha-pulse): desired backend tag ${IMAGE_TAG} before rollout (tracks ${PIN_TRACKING_KEY})','content':sys.argv[1],'sha':'${FILE_SHA}','branch':'master','committer':{'email':'ci@shizuha.com','name':'Origin CI'}}))" "${NEW_B64}")"
+              forgejo_contents_curl --accept-codes '^(200|201|409)$' PUT \
+                "${FGJO_URL}/api/v1/repos/shizuha-labs/deploy/contents/${VALS_PATH}" \
+                -d "${BODY}"
+              rm -f "${FGJO_HTTP_BODY_FILE}"
+              FGJO_HTTP_BODY_FILE=""
+              if printf '%s' "${FGJO_HTTP_CODE}" | grep -Eq '^(200|201)$'; then
+                PROMOTED=true
+                echo "deploy repo desired backend tag updated to ${IMAGE_TAG}"
+                return 0
+              fi
+              if [ "${write_attempt}" != 8 ]; then
+                echo "deploy values changed concurrently; retrying fresh read (${write_attempt}/8)"
+                sleep $((2 + RANDOM % (4 * write_attempt)))
+                continue
+              fi
+              echo "::error::deploy values changed concurrently on all eight write attempts"
+              return 1
+            done
+          }
+
+          assert_deploy_values_backend_tag() {
+            local EXPECTED="$1"
+            local ACTUAL
+            read_deploy_values_to /tmp/pulse-deploy-values-resp.json
+            python3 -c 'import base64,json; open("/tmp/values.yaml","wb").write(base64.b64decode(json.load(open("/tmp/pulse-deploy-values-resp.json"))["content"]))'
+            ACTUAL="$(python3 .forgejo/scripts/deploy-values-path.py get /tmp/values.yaml image.tag)"
+            echo "deploy repo desired backend tag: ${ACTUAL}"
+            test "${ACTUAL}" = "${EXPECTED}" || { echo "::error::deploy repo desired backend tag ${ACTUAL} != ${EXPECTED}"; exit 1; }
+          }
+
+          dispatch_lifecycle_reconcile() {
+            deploy_values_api
+            forgejo_contents_curl --accept-codes '^204$' POST \
+              "${FGJO_URL}/api/v1/repos/shizuha-labs/deploy/actions/workflows/deploy-id-mail-lifecycle.yml/dispatches" \
+              -d '{"ref":"master"}'
+            rm -f "${FGJO_HTTP_BODY_FILE}"
+            FGJO_HTTP_BODY_FILE=""
+          }
+
+          # The canonical chart is the sole desired-state authority, and the
+          # central lifecycle is the sole Helm/workload writer.
+          PROMOTED=false
+          update_deploy_values_backend_tag "${TAG}"
+          assert_deploy_values_backend_tag "${TAG}"
+          if [ "${PROMOTED}" != true ]; then
+            dispatch_lifecycle_reconcile
+            echo "central lifecycle reconcile dispatched for existing desired tag ${TAG}"
+          fi
+
+          deployment_state() {
+            kubectl get deploy -n shizuha "$1" -o json 2>/dev/null | python3 -c '
+          import json, sys
+          obj = json.load(sys.stdin)
+          meta, spec, status = obj.get("metadata", {}), obj.get("spec", {}), obj.get("status", {})
+          fields = (
+              meta.get("generation", ""), status.get("observedGeneration", ""),
+              status.get("updatedReplicas", ""), status.get("availableReplicas", ""),
+              status.get("readyReplicas", ""), spec.get("replicas", ""),
+          )
+          print("|".join(str(value) for value in fields))
+          '
+          }
+
+          exact_pod_state() {
+            local selector="$1"
+            local expected_image="$2"
+            kubectl get pods -n shizuha -l "${selector}" -o json 2>/dev/null \
+              | python3 .forgejo/scripts/exact-deployment-pods.py \
+                  --expected-image "${expected_image}"
+          }
+
+          EXPECTED_IMAGE="localhost:30500/shizuha-pulse:${TAG}"
+          for attempt in $(seq 1 540); do
+            read_deploy_values_to /tmp/pulse-convergence-values.json
+            python3 -c 'import base64,json; open("/tmp/convergence-values.yaml","wb").write(base64.b64decode(json.load(open("/tmp/pulse-convergence-values.json"))["content"]))'
+            CHART_BACKEND_TAG="$(python3 .forgejo/scripts/deploy-values-path.py get /tmp/convergence-values.yaml image.tag)"
+            # Re-read the sibling tag on every iteration: a concurrent frontend
+            # promotion supersedes the older snapshot instead of false-reding
+            # this backend run against a tag the chart no longer requests.
+            CHART_FRONTEND_TAG="$(python3 .forgejo/scripts/deploy-values-path.py get /tmp/convergence-values.yaml frontend.image.tag)"
+            # A newer backend promotion may advance desired state after this
+            # run wrote its tag but before the shared lifecycle finishes. That
+            # is a successful supersession, not a reason for the older run to
+            # occupy a deploy lane for the full 45-minute convergence bound.
+            if [ -n "${CHART_BACKEND_TAG}" ] && [ "${CHART_BACKEND_TAG}" != "${TAG}" ]; then
+              echo "Pulse backend desired state advanced to ${CHART_BACKEND_TAG}; this run is superseded"
+              exit 0
+            fi
+            EXPECTED_FRONTEND_IMAGE="localhost:30500/shizuha-pulse-frontend:${CHART_FRONTEND_TAG}"
+            LIVE="$(kubectl get deploy -n shizuha shizuha-pulse -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+            LIVE_FRONTEND="$(kubectl get deploy -n shizuha shizuha-pulse-frontend -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+            BACKEND_STATE="$(deployment_state shizuha-pulse || true)"
+            IFS='|' read -r GENERATION OBSERVED UPDATED AVAILABLE READY DESIRED <<< "${BACKEND_STATE}"
+            BACKEND_POD_STATE="$(
+              exact_pod_state \
+                'app.kubernetes.io/component=backend,app.kubernetes.io/instance=shizuha-pulse,app.kubernetes.io/name=shizuha-pulse' \
+                "${EXPECTED_IMAGE}" || true
+            )"
+            IFS='|' read -r EXACT_PODS EXACT_READY_PODS OLD_PODS FOREIGN_PODS EXACT_RESTARTS \
+              <<< "${BACKEND_POD_STATE}"
+            FRONTEND_STATE="$(deployment_state shizuha-pulse-frontend || true)"
+            IFS='|' read -r FRONTEND_GENERATION FRONTEND_OBSERVED FRONTEND_UPDATED FRONTEND_AVAILABLE FRONTEND_READY FRONTEND_DESIRED <<< "${FRONTEND_STATE}"
+            FRONTEND_POD_STATE="$(
+              exact_pod_state \
+                'app.kubernetes.io/name=shizuha-pulse-frontend' \
+                "${EXPECTED_FRONTEND_IMAGE}" || true
+            )"
+            IFS='|' read -r FRONTEND_EXACT_PODS FRONTEND_EXACT_READY_PODS FRONTEND_OLD_PODS FRONTEND_FOREIGN_PODS FRONTEND_EXACT_RESTARTS \
+              <<< "${FRONTEND_POD_STATE}"
+            HELM_VALUES="$(helm get values shizuha-pulse -n shizuha -o json 2>/dev/null || true)"
+            STORED_BACKEND_TAG="$(printf '%s' "${HELM_VALUES}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("image",{}).get("tag",""))' 2>/dev/null || true)"
+            STORED_FRONTEND_TAG="$(printf '%s' "${HELM_VALUES}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("frontend",{}).get("image",{}).get("tag",""))' 2>/dev/null || true)"
+            if [ "${CHART_BACKEND_TAG}" = "${TAG}" ] \
+              && [ "${LIVE}" = "${EXPECTED_IMAGE}" ] \
+              && [ "${LIVE_FRONTEND}" = "${EXPECTED_FRONTEND_IMAGE}" ] \
+              && [ "${STORED_BACKEND_TAG}" = "${CHART_BACKEND_TAG}" ] \
+              && [ "${STORED_FRONTEND_TAG}" = "${CHART_FRONTEND_TAG}" ] \
+              && [ -n "${GENERATION}" ] && [ -n "${OBSERVED}" ] && [ "${OBSERVED}" -ge "${GENERATION}" ] \
+              && [ -n "${DESIRED}" ] && [ "${UPDATED}" = "${DESIRED}" ] \
+              && [ "${AVAILABLE}" = "${DESIRED}" ] && [ "${READY}" = "${DESIRED}" ] \
+              && [ "${EXACT_PODS}" = "${DESIRED}" ] \
+              && [ "${EXACT_READY_PODS}" = "${DESIRED}" ] \
+              && [ "${OLD_PODS}" = 0 ] && [ "${FOREIGN_PODS}" = 0 ] \
+              && [ "${EXACT_RESTARTS}" = 0 ] \
+              && [ -n "${FRONTEND_GENERATION}" ] && [ -n "${FRONTEND_OBSERVED}" ] \
+              && [ "${FRONTEND_OBSERVED}" -ge "${FRONTEND_GENERATION}" ] \
+              && [ -n "${FRONTEND_DESIRED}" ] && [ "${FRONTEND_UPDATED}" = "${FRONTEND_DESIRED}" ] \
+              && [ "${FRONTEND_AVAILABLE}" = "${FRONTEND_DESIRED}" ] \
+              && [ "${FRONTEND_READY}" = "${FRONTEND_DESIRED}" ] \
+              && [ "${FRONTEND_EXACT_PODS}" = "${FRONTEND_DESIRED}" ] \
+              && [ "${FRONTEND_EXACT_READY_PODS}" = "${FRONTEND_DESIRED}" ] \
+              && [ "${FRONTEND_OLD_PODS}" = 0 ] && [ "${FRONTEND_FOREIGN_PODS}" = 0 ] \
+              && [ "${FRONTEND_EXACT_RESTARTS}" = 0 ]; then
+              echo "Chart, Helm, backend, and frontend converged on attempt ${attempt}"
+              break
+            fi
+            if [ "${attempt}" = 540 ]; then
+              echo "::error::central lifecycle did not converge Pulse release"; exit 1
+            fi
+            sleep 5
+          done
+          echo "Verified canonical chart, Helm values, and ready Pulse workloads for ${TAG}"
+
+          # DeploymentEvent is post-rollout evidence, not part of the rollout
+          # transaction. Keep it fail-loud in the log without rewriting a
+          # converged deployment as failed when task correlation is missing.
+          # (PLS-684: the lane had no emitter at all — run 7008 converged green
+          # 8/8 Ready and the close gate still refused with
+          # missing_correlated_deploy_event. The wiki-lane pattern, direct-Bearer
+          # credential form per the PLAT-7957 rotated pulse-api-token secret.)
+          # PLS-1320 follow-up: hand the recorder the deploy job's demonstrated
+          # Forgejo API credential (DEPLOY_PUSH_TOKEN — the same token the
+          # desired-tag push already uses against the Forgejo API). Without it
+          # the script degrades to the kubectl-secret fallbacks, which come up
+          # empty in this job (run 7086: all three sources empty → "Forgejo API
+          # token unavailable" → PR provenance skipped → "did not correlate to
+          # any linked Pulse task" → recording failed), so every green rollout
+          # of this lane records no DeploymentEvent and future close gates
+          # refuse with missing_correlated_deploy_event.
+          if ! FORGEJO_TOKEN="${{ secrets.DEPLOY_PUSH_TOKEN }}" \
+            .forgejo/scripts/record-deployment-event.sh \
+            PLS shizuha shizuha-pulse backend shizuha-pulse \
+            "localhost:30500/shizuha-pulse:${TAG}" \
+            /pulse/; then
+            echo "::warning::backend rollout succeeded but DeploymentEvent recording failed"
+          fi

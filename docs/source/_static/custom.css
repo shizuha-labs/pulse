@@ -1,0 +1,178 @@
+/* Custom styles for Shizuha Hub documentation */
+
+/* Code blocks */
+.highlight {
+    border-radius: 8px;
+}
+
+/* API endpoint styling */
+.http-method {
+    font-weight: bold;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-right: 8px;
+}
+
+.http-get {
+    background-color: #61affe;
+    color: white;
+}
+
+.http-post {
+    background-color: #49cc90;
+    color: white;
+}
+
+.http-put {
+    background-color: #fca130;
+    color: white;
+}
+
+.http-delete {
+    background-color: #f93e3e;
+    color: white;
+}
+
+/* Mermaid diagram styling */
+.mermaid {
+    text-align: center;
+    margin: 1.5rem 0;
+}
+
+/* Grid cards */
+.sd-card {
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.sd-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+/* Table styling */
+table.docutils {
+    border-collapse: collapse;
+    width: 100%;
+}
+
+table.docutils th {
+    background-color: var(--color-brand-primary);
+    color: white;
+    padding: 12px;
+}
+
+table.docutils td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--color-background-border);
+}
+
+/* Admonition styling */
+.admonition {
+    border-radius: 8px;
+    border-left-width: 4px;
+}
+
+/* Copy button */
+.copybtn {
+    opacity: 0.5;
+    transition: opacity 0.2s;
+}
+
+.copybtn:hover {
+    opacity: 1;
+}
+
+/* Tabs styling */
+.sphinx-tabs-tab {
+    font-weight: 500;
+}
+
+/* Sidebar */
+.sidebar-brand {
+    padding: 1rem;
+}
+
+/* Content width */
+.content {
+    max-width: none;
+}
+
+/* Method signature styling */
+.sig-name {
+    font-weight: bold;
+}
+
+.sig-param {
+    font-style: italic;
+}
+
+/* API parameter tables */
+.field-list {
+    margin-bottom: 1rem;
+}
+
+.field-list dt {
+    font-weight: bold;
+    color: var(--color-brand-primary);
+}
+
+/* Status badges */
+.status-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.85em;
+    font-weight: 500;
+}
+
+.status-firing {
+    background-color: #f93e3e;
+    color: white;
+}
+
+.status-acknowledged {
+    background-color: #fca130;
+    color: white;
+}
+
+.status-resolved {
+    background-color: #49cc90;
+    color: white;
+}
+
+.status-pending {
+    background-color: #61affe;
+    color: white;
+}
+
+/* Priority badges */
+.priority-urgent {
+    background-color: #f93e3e;
+    color: white;
+}
+
+.priority-high {
+    background-color: #fca130;
+    color: white;
+}
+
+.priority-normal {
+    background-color: #61affe;
+    color: white;
+}
+
+.priority-low {
+    background-color: #94a3b8;
+    color: white;
+}
+
+/* Dark mode adjustments */
+@media (prefers-color-scheme: dark) {
+    table.docutils th {
+        background-color: var(--color-brand-primary);
+    }
+
+    table.docutils td {
+        border-color: var(--color-background-border);
+    }
+}

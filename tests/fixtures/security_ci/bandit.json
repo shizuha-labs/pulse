@@ -1,0 +1,1 @@
+{"results":[{"test_id":"B602","test_name":"subprocess_popen_with_shell_equals_true","filename":"app.py","line_number":12,"issue_severity":"HIGH","issue_confidence":"HIGH","issue_text":"subprocess call with shell=True identified","issue_cwe":{"id":78,"link":"https://cwe.mitre.org/data/definitions/78.html"}}]}

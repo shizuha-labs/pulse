@@ -1,0 +1,1 @@
+docker exec -it shizuha-pulse python manage.py quickreminder "Test reminder with supervisor" 5 --description "Testing the new supervisord setup"

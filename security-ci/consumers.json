@@ -1,0 +1,194 @@
+{
+  "schema": "shizuha.security-ci-consumers.v1",
+  "contract_version": 3,
+  "source": {
+    "repo": "shizuha-tasks",
+    "branch": "main",
+    "workflow": ".forgejo/workflows/security-ci.yml",
+    "normalizer": "scripts/security-ci-to-pulse.py",
+    "checker": "scripts/check-security-ci-contract.py",
+    "parity_template": "security-ci/templates/security-ci-parity.yml",
+    "workflow_sha256": "5f95a17a8c0e9de19e96f28cb22bfd8782c488ba7e2837c4d7d613dc86215c0a",
+    "normalizer_sha256": "c147367254e889064ad7e4e9fbef658e1e5a38150084ef74aa3634ca333de6b2",
+    "checker_sha256": "e037166913741ad81527eb8a4e7ba9a1d246afef6e4341d54d6f7f9213e93bd2",
+    "parity_template_sha256": "8ab24dc5d6357b9168758dbca93a745a336f5d2535e7cb12ffd1849d2b6c91a5"
+  },
+  "consumers": [
+    {
+      "repo": "connect",
+      "default_branch": "master",
+      "project_id": 336,
+      "schedule": "30 21 * * 3",
+      "contract_version": 3,
+      "expected_bundle_sha256": "6f4b281c57fea25729f6ae7732ee72c02538bc51b6af23d0f80044622f86bc0f"
+    },
+    {
+      "repo": "hive",
+      "default_branch": "main",
+      "project_id": 332,
+      "schedule": "30 21 * * 0",
+      "contract_version": 3,
+      "expected_bundle_sha256": "d5c7a1b3c05c8d79094bdeb4dd4a0d7dd5aee2a75e19ddefd20541bba8fe8d11"
+    },
+    {
+      "repo": "wiki",
+      "default_branch": "main",
+      "project_id": 350,
+      "schedule": "30 21 * * 4",
+      "contract_version": 3,
+      "expected_bundle_sha256": "8650d12c8068df7957fcb4018ad58556ecc04d053a3cce20dc20b345bb642fdf"
+    },
+    {
+      "repo": "id",
+      "default_branch": "main",
+      "project_id": 346,
+      "schedule": "30 21 * * 2",
+      "contract_version": 3,
+      "expected_bundle_sha256": "f488768e9df41d56daad1c46540bbabaa55dd4a0259108ea037c8c59aac164d5"
+    },
+    {
+      "repo": "drive",
+      "default_branch": "main",
+      "project_id": 342,
+      "schedule": "30 23 * * 3",
+      "contract_version": 3,
+      "expected_bundle_sha256": "2493a8e234e0cc8c2e06949b62753979c3ffb9a9608ec94a9491b6aaaabf8ea9"
+    },
+    {
+      "repo": "mail",
+      "default_branch": "main",
+      "project_id": 347,
+      "schedule": "30 19 * * 6",
+      "contract_version": 3,
+      "expected_bundle_sha256": "c8c980a487335945a2eca244f1c3e88633925792c15fa9155b8fd2af1d2ef6cb"
+    },
+    {
+      "repo": "notes",
+      "default_branch": "main",
+      "project_id": 348,
+      "schedule": "30 23 * * 5",
+      "contract_version": 3,
+      "expected_bundle_sha256": "ee17e8d2dae8b97c95ff7cffc5f398405fea1eea01846e6e8e262a16a1490dd1"
+    },
+    {
+      "repo": "cortex",
+      "default_branch": "master",
+      "project_id": 334,
+      "schedule": "30 21 * * 1",
+      "contract_version": 3,
+      "expected_bundle_sha256": "ccd2a32178d657df20c9f37a4dfc2af48685121f46a43496aa03763318aade75"
+    },
+    {
+      "repo": "search",
+      "default_branch": "master",
+      "project_id": 339,
+      "schedule": "30 23 * * 4",
+      "contract_version": 3,
+      "expected_bundle_sha256": "c34731efd85451f978147ceef186e407ad19deccae9139bd6b441ff259fc9d06"
+    },
+    {
+      "repo": "books",
+      "default_branch": "main",
+      "project_id": 340,
+      "schedule": "30 19 * * 0",
+      "contract_version": 3,
+      "expected_bundle_sha256": "88e15f3b3106119762d734304a196cba571fd6f49aa85f7e0908ba07cfe1fb89"
+    },
+    {
+      "repo": "finance",
+      "default_branch": "master",
+      "project_id": 343,
+      "schedule": "30 19 * * 1",
+      "contract_version": 3,
+      "expected_bundle_sha256": "6c82d188fae2dd174d1f12e31553abdd85f17622e3032559fb8e406ad5cfdda9"
+    },
+    {
+      "repo": "inventory",
+      "default_branch": "main",
+      "project_id": 345,
+      "schedule": "30 19 * * 4",
+      "contract_version": 3,
+      "expected_bundle_sha256": "6d3cf10aba293a140178e3741543fe3cd326bfaae7059bd5f77052411e26b459"
+    },
+    {
+      "repo": "dojo",
+      "default_branch": "main",
+      "project_id": 359,
+      "schedule": "30 19 * * 2",
+      "contract_version": 3,
+      "expected_bundle_sha256": "574b58308538e2c227630bf014063d2e752ca7ea5688108cc2296e0206cd07eb"
+    },
+    {
+      "repo": "admin",
+      "default_branch": "main",
+      "project_id": 331,
+      "schedule": "30 23 * * 2",
+      "contract_version": 3,
+      "expected_bundle_sha256": "cc79de4917f6e27a7173505d9cb6eb1c6d02ca665a40b870fb262cd59248c52d"
+    },
+    {
+      "repo": "home",
+      "default_branch": "main",
+      "project_id": 331,
+      "schedule": "30 23 * * 1",
+      "contract_version": 3,
+      "expected_bundle_sha256": "23cd0011b5c4501a3d4f95d3cbb3add7fb64eee8c94a3651a52cb1f43d12bd09"
+    },
+    {
+      "repo": "shizuha",
+      "default_branch": "master",
+      "project_id": 333,
+      "schedule": "30 21 * * 6",
+      "contract_version": 3,
+      "expected_bundle_sha256": "b322256ce3ef398fc49b12640ff1793dc4ba6158aab63d6d04bbfca8fb95ba96"
+    },
+    {
+      "repo": "browser",
+      "default_branch": "main",
+      "project_id": 341,
+      "schedule": "30 17 * * 0",
+      "contract_version": 3,
+      "expected_bundle_sha256": "6e5284ed84e28d4d6af7be0a1894b57253b84c1c6de9f7a13c0a320a3675ea2c"
+    },
+    {
+      "repo": "forge",
+      "default_branch": "master",
+      "project_id": 344,
+      "schedule": "30 19 * * 3",
+      "contract_version": 3,
+      "expected_bundle_sha256": "fc6e1b7de79c0dc7496088059f04650473b3b8ff2fe6a1a9c21801b19d9a9a8c"
+    },
+    {
+      "repo": "kura-beta",
+      "default_branch": "master",
+      "project_id": 338,
+      "schedule": "30 23 * * 6",
+      "contract_version": 3,
+      "expected_bundle_sha256": "7c2e5ab8f07d0761464ab9feb427678979c9a7102ba2675b64b0222aa8a54326"
+    },
+    {
+      "repo": "kotlin",
+      "default_branch": "main",
+      "project_id": 337,
+      "schedule": "30 19 * * 5",
+      "contract_version": 3,
+      "expected_bundle_sha256": "48f07c8a18532ae1753d14dc9c0f09d56c3f9d2ae2530a43cf4c888006844157"
+    },
+    {
+      "repo": "deploy",
+      "default_branch": "master",
+      "project_id": 331,
+      "schedule": "30 21 * * 5",
+      "contract_version": 3,
+      "expected_bundle_sha256": "ad70f899b55ab610ac3f630afed587bc8bb34ea7c93a79d17384a6491090c199"
+    },
+    {
+      "repo": "shizuha-tasks",
+      "default_branch": "main",
+      "project_id": 335,
+      "schedule": "30 23 * * 0",
+      "contract_version": 3,
+      "expected_bundle_sha256": "83dfa18b0f5499642b66f7dd768316efb4afc6b9d673160de2ba6b0a813ec243"
+    }
+  ]
+}

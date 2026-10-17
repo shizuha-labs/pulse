@@ -1,0 +1,62 @@
+"""Copy to conftest.py for pytest-based Django services.
+
+Requires scripts/hermetic_socket_guard.py on PYTHONPATH (or vendor the module).
+For unittest-only services, wrap the suite setup with socket_guard() instead.
+"""
+from __future__ import annotations
+
+import pytest
+
+try:
+    import fakeredis
+except Exception:  # pragma: no cover - template supports projects without fakeredis
+    fakeredis = None
+
+from scripts.hermetic_socket_guard import socket_guard
+
+
+@pytest.fixture(autouse=True)
+def no_outbound_network(settings):
+    if not getattr(settings, 'TESTING', False):
+        yield
+        return
+    with socket_guard(allow_loopback=True):
+        yield
+
+
+@pytest.fixture
+def fake_redis():
+    if fakeredis is None:
+        class NoopRedis:
+            def __getattr__(self, _name):
+                def _noop(*_args, **_kwargs):
+                    return None
+                return _noop
+        return NoopRedis()
+    return fakeredis.FakeRedis(decode_responses=True)
+
+
+@pytest.fixture
+def test_jwt():
+    return 'test.jwt.local'
+
+
+@pytest.fixture
+def fake_shizuha_id(monkeypatch, test_jwt):
+    def _fake_get_user(*_args, **_kwargs):
+        return {'id': 1, 'email': 'test@example.com', 'username': 'test-user', 'token': test_jwt}
+    return _fake_get_user
+
+
+@pytest.fixture
+def fake_cortex_response():
+    return {'status': 'ok', 'text': 'canned test response'}
+
+
+@pytest.fixture
+def stub_notifications(monkeypatch):
+    sent = []
+    def _send(*args, **kwargs):
+        sent.append({'args': args, 'kwargs': kwargs})
+        return {'ok': True}
+    return sent, _send

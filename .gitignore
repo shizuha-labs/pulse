@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+.venv*/
+env/
+ENV/
+
+# Django
+*.log
+*.pot
+*.pyc
+db.sqlite3
+db.sqlite3-journal
+media/
+static/
+staticfiles/
+local_settings.py
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Celery
+celerybeat-schedule
+celerybeat-schedule.db
+celerybeat.pid
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+docs/_build/
+frontend/dist/
+frontend/test_results/
+frontend/test-results
+frontend/node_modules/
+npm-debug.log*
+yarn-error.log**
+yarn-debug.log*
+
+dump.rdb
+
+# Local environments, caches, and editor scratch (never commit)
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.claude/
+
+# Generated verification captures belong in private CI artifacts.
+frontend/playwright-report/
+frontend/check-*.png
+frontend/dash-*.png
+frontend/dashboard-*.png
+frontend/all-logs.txt
+frontend/bridge-logs.txt
+frontend/network.txt

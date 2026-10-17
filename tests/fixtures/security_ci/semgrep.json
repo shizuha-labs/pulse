@@ -1,0 +1,1 @@
+{"results":[{"check_id":"python.lang.security.audit.dangerous-subprocess-use","path":"app.py","start":{"line":12},"extra":{"severity":"ERROR","message":"subprocess call with shell=True","metadata":{"cwe":["CWE-78"],"references":["https://semgrep.dev/docs/"]}}}]}

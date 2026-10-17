@@ -1,0 +1,455 @@
+# ORIG-18: PR-gating test job. Byte-identical to deploy.yml's `test` job but
+# triggered on pull_request, so Forgejo branch protection can require the
+# context `premerge / test (pull_request)` before any merge to the default
+# branch — the platform-native fix for the PR-merge gate-bypass hole
+# (PLAT-4516; three deploy-ring wedges in three days via stale-branch merges).
+#
+# Keep the test job in sync with deploy.yml when it changes, with ONE deliberate
+# divergence (PLS-702): this job's git-clone init container checks out the PR
+# head MERGED WITH the PR's advertised base SHA and runs the suite from that
+# temporary combined tree. deploy.yml tests a pushed commit, which already IS
+# the merged result, so it needs no such step. Do not "resync" that difference
+# away — PLS-699 is the incident it exists to prevent: PR head and main each
+# passed alone while their merge failed with two Django migration leaves.
+# The combined tree is local to the pod and is never pushed.
+name: premerge
+on:
+  workflow_dispatch: {}
+  pull_request:
+
+jobs:
+  test:
+    concurrency:
+      group: deploy-shizuha-pulse-test-${{ github.ref }}
+      cancel-in-progress: true
+    # Match deploy.yml's test orchestration lane so the required PR gate is not
+    # starved behind unrelated general-runner work.
+    runs-on: deploy-lane
+    steps:
+      - name: Install kubectl + cluster access
+        run: |
+          set -euo pipefail
+          KUBECTL_ARCH=$(uname -m); case "$KUBECTL_ARCH" in x86_64) KUBECTL_ARCH=amd64;; aarch64) KUBECTL_ARCH=arm64;; esac
+          case "$KUBECTL_ARCH" in
+            amd64) KUBECTL_SHA=7721f265e18709862655affba5343e85e1980639395d5754473dafaadcaa69e3 ;;
+            arm64) KUBECTL_SHA=420e6110e3ba7ee5a3927b5af868d18df17aae36b720529ffa4e9e945aa95450 ;;
+          esac
+          # anonymous-fetch: sanctioned — adding Authorization can turn this public package fetch into 401 (ORIG-144)
+          curl --retry 3 --retry-all-errors --retry-delay 1 --max-time 60 -fsSL \
+            -o kubectl "http://forgejo-http.origin.svc.cluster.local/api/packages/actions/generic/kubectl/v1.34.1/kubectl-${KUBECTL_ARCH}"
+          echo "$KUBECTL_SHA  kubectl" | sha256sum -c -
+          install -m 0755 kubectl /usr/local/bin/kubectl
+          mkdir -p "$HOME/.kube"
+          printf '%s' "${{ secrets.KUBE_CONFIG_B64 }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+      - name: Run backend test suite before deploy
+        run: |
+          set -euo pipefail
+          SHORT="$(echo "${{ github.sha }}" | cut -c1-7)"
+          JOB="ci-test-shizuha-pulse-${SHORT}"
+          kubectl delete job -n build "${JOB}" --ignore-not-found
+
+          cat <<YAML | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${JOB}
+            namespace: build
+            labels: { app: ci-test, service: shizuha-pulse, shizuha.io/ci-gate: PLAT-1219, shizuha.io/orig-task: ORIG-9 }
+          spec:
+            backoffLimit: 0
+            # ORIG-11 2026-07-16: the CI gate stops polling at its timeout, but a
+            # wedged suite pod (e.g. apt hung through the cache proxy during a
+            # gx->s1 stall, PLAT-4692) runs forever and leaks its memory request
+            # (three such pods found Running 10-15h). Reap the Job shortly after
+            # the gate has given up; ttl only applies once the Job finishes.
+            activeDeadlineSeconds: 2100
+            ttlSecondsAfterFinished: 3600
+            template:
+              spec:
+                restartPolicy: Never
+                affinity:
+                  nodeAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                      nodeSelectorTerms:
+                      - matchExpressions:
+                        - { key: node-role.kubernetes.io/control-plane, operator: DoesNotExist }
+                initContainers:
+                  # The Actions runner is outside the Kubernetes executor
+                  # boundary, so it must not call *.svc.cluster.local itself.
+                  # This in-cluster init container is the synchronous
+                  # pre-publish admission point for the exact PR head.
+                  - name: source-authority-contract
+                    image: curlimages/curl:8.5.0
+                    command: ["/bin/sh","-c"]
+                    args:
+                      - |
+                        set -euo pipefail
+                        case "\${SOURCE_SHA}" in
+                          [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+                          *) echo "invalid exact PR head: \${SOURCE_SHA}" >&2; exit 64 ;;
+                        esac
+                        printf '{"repo":"${{ github.event.repository.name }}","ref":"%s"}' "\${SOURCE_SHA}" > /tmp/source-authority.json
+                        # The registry rollout can briefly surface a transient
+                        # 5xx/timeout to a just-scheduled consumer. Retry only
+                        # curl's transient classes (plus connection refused);
+                        # deterministic contract rejections must still fail
+                        # immediately and closed.
+                        curl --fail-with-body --retry 8 --retry-connrefused \
+                          --retry-delay 2 --retry-max-time 30 \
+                          --connect-timeout 3 --max-time 10 \
+                          -H 'Content-Type: application/json' \
+                          -H 'X-Shizuha-Event-Source: origin-ci' \
+                          --data-binary @/tmp/source-authority.json \
+                          http://repo-config-probe.origin.svc.cluster.local:8080/contracts/repository
+                    env:
+                      - name: SOURCE_SHA
+                        value: "${{ github.event.pull_request.head.sha }}"
+                  - name: git-clone
+                    image: alpine/git:2.43.0
+                    command: ["/bin/sh","-c"]
+                    args:
+                      - |
+                        set -euo pipefail
+                        SOURCE_URL="\${GIT_SOURCE_URL:-}"
+                        SOURCE_SHA="\${GIT_SOURCE_SHA:-}"
+                        [ -n "\${SOURCE_URL}" ] && [ "\${SOURCE_URL}" != "<no value>" ] || SOURCE_URL="http://forgejo-http.origin.svc.cluster.local/${{ github.repository }}.git"
+                        [ -n "\${SOURCE_SHA}" ] && [ "\${SOURCE_SHA}" != "<no value>" ] || SOURCE_SHA="${{ github.sha }}"
+                        case "\${SOURCE_URL}" in
+                          http://forgejo-http.origin.svc.cluster.local/*) AUTH_URL="http://x-token-auth:\${GIT_PASSWORD}@forgejo-http.origin.svc.cluster.local/\${SOURCE_URL#http://forgejo-http.origin.svc.cluster.local/}" ;;
+                          https://origin.shizuha.com/*) AUTH_URL="http://x-token-auth:\${GIT_PASSWORD}@forgejo-http.origin.svc.cluster.local/\${SOURCE_URL#https://origin.shizuha.com/}" ;;
+                          *) echo "refusing non-Origin source URL: \${SOURCE_URL}" >&2; exit 64 ;;
+                        esac
+                        # PLS-702: the tested tree is the PR head MERGED WITH the
+                        # advertised base, not the head in isolation. PLS-699: head
+                        # 2e2d2e47 and main 2914f388 each passed alone while their
+                        # merge failed Django with two migration leaves — a class of
+                        # break that is invisible to any head-only gate.
+                        BASE_SHA="\${GIT_BASE_SHA:-}"
+                        BASE_URL="\${GIT_BASE_URL:-}"
+                        # Fail closed: never substitute a moving branch name (main,
+                        # origin/main, HEAD) for an absent advertised base. A gate that
+                        # silently retargets is worse than one that stops.
+                        case "\${BASE_SHA}" in
+                          [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+                          *) echo "refusing: no exact advertised base SHA (got '\${BASE_SHA}')" >&2; exit 64 ;;
+                        esac
+                        [ -n "\${BASE_URL}" ] && [ "\${BASE_URL}" != "<no value>" ] || BASE_URL="\${SOURCE_URL}"
+                        case "\${BASE_URL}" in
+                          http://forgejo-http.origin.svc.cluster.local/*) AUTH_BASE_URL="http://x-token-auth:\${GIT_PASSWORD}@forgejo-http.origin.svc.cluster.local/\${BASE_URL#http://forgejo-http.origin.svc.cluster.local/}" ;;
+                          https://origin.shizuha.com/*) AUTH_BASE_URL="http://x-token-auth:\${GIT_PASSWORD}@forgejo-http.origin.svc.cluster.local/\${BASE_URL#https://origin.shizuha.com/}" ;;
+                          *) echo "refusing non-Origin base URL: \${BASE_URL}" >&2; exit 64 ;;
+                        esac
+
+                        git init /workspace/src
+                        cd /workspace/src
+                        git remote add origin "\${AUTH_URL}"
+                        # A merge needs a common ancestor, so --depth=1 (the head-only
+                        # gate's depth) cannot work here. Start shallow-but-usable and
+                        # deepen only if the histories have not yet met.
+                        git fetch --depth=50 origin "\${SOURCE_SHA}"
+                        git checkout --detach FETCH_HEAD
+                        # This script is embedded in an unquoted outer heredoc; escape
+                        # command substitution so the in-pod shell (not the Origin
+                        # runner) evaluates it. Otherwise push builds compare an empty
+                        # rendered revision with SOURCE_SHA and the init container fails.
+                        test "\$(git rev-parse HEAD)" = "\${SOURCE_SHA}"
+
+                        git remote add base "\${AUTH_BASE_URL}"
+                        git fetch --depth=50 base "\${BASE_SHA}"
+                        test "\$(git rev-parse FETCH_HEAD)" = "\${BASE_SHA}"
+                        # Deepen progressively rather than --unshallow-ing up front:
+                        # this repo's history is large and the common ancestor is
+                        # almost always within the first window.
+                        if ! git merge-base "\${SOURCE_SHA}" "\${BASE_SHA}" >/dev/null 2>&1; then
+                          git fetch --deepen=200 origin "\${SOURCE_SHA}" || true
+                          git fetch --deepen=200 base "\${BASE_SHA}" || true
+                        fi
+                        if ! git merge-base "\${SOURCE_SHA}" "\${BASE_SHA}" >/dev/null 2>&1; then
+                          git fetch --unshallow origin "\${SOURCE_SHA}" || git fetch origin || true
+                          git fetch --unshallow base "\${BASE_SHA}" || git fetch base || true
+                        fi
+                        git merge-base "\${SOURCE_SHA}" "\${BASE_SHA}" >/dev/null \
+                          || { echo "refusing: no common ancestor between head and advertised base" >&2; exit 65; }
+
+                        # The merge is LOCAL and is never pushed anywhere. A textual
+                        # conflict exits non-zero here, before any PR-authored code has
+                        # been executed by the test container.
+                        if git merge-base --is-ancestor "\${BASE_SHA}" HEAD; then
+                          echo "advertised base is already contained in the PR head; head is the combined tree"
+                        else
+                          git -c user.email=ci@shizuha.local -c user.name='Origin CI' \
+                            merge --no-ff --no-edit "\${BASE_SHA}" \
+                            || { echo "::error::PR head does not merge cleanly with its advertised base" >&2; exit 66; }
+                        fi
+
+                        # The invariant is CONTAINMENT of both advertised commits, which
+                        # holds whether or not a merge commit was created (an already-
+                        # merged base produces no commit even under --no-ff).
+                        git merge-base --is-ancestor "\${SOURCE_SHA}" HEAD \
+                          || { echo "combined tree lost the PR head" >&2; exit 67; }
+                        git merge-base --is-ancestor "\${BASE_SHA}" HEAD \
+                          || { echo "combined tree does not contain the advertised base" >&2; exit 67; }
+                        echo "combined-tree head : \$(git rev-parse HEAD)"
+                        echo "combined-tree tree : \$(git rev-parse HEAD^{tree})"
+                        echo "advertised head    : \${SOURCE_SHA}"
+                        echo "advertised base    : \${BASE_SHA}"
+                        echo "parents            : \$(git rev-list --parents -n1 HEAD)"
+                    env:
+                      - name: GIT_PASSWORD
+                        valueFrom: { secretKeyRef: { name: forgejo-token, key: password } }
+                      - name: GIT_SOURCE_URL
+                        value: "${{ github.event.pull_request.head.repo.clone_url }}"
+                      - name: GIT_SOURCE_SHA
+                        value: "${{ github.event.pull_request.head.sha }}"
+                      - name: GIT_BASE_URL
+                        value: "${{ github.event.pull_request.base.repo.clone_url }}"
+                      - name: GIT_BASE_SHA
+                        value: "${{ github.event.pull_request.base.sha }}"
+                    volumeMounts: [{ mountPath: /workspace, name: workspace }]
+                containers:
+                  - name: test
+                    image: python:3.12-bookworm
+                    command: ["/bin/bash","-lc"]
+                    args:
+                      - |
+                        set -euo pipefail
+                        export DEBIAN_FRONTEND=noninteractive
+                        printf '%s\n' \
+                          'Acquire::http::Proxy "http://apt-cache.registry.svc.cluster.local:3142";' \
+                          'Acquire::Retries "10";' \
+                          'Acquire::http::Timeout "30";' \
+                          > /etc/apt/apt.conf.d/01proxy
+                        apt_update() {
+                          # A corrupt/stale partial InRelease previously left apt's
+                          # http+gpgv workers alive forever despite Acquire timeout.
+                          # Bound the whole command and discard only job-local partials.
+                          rm -f /var/lib/apt/lists/partial/*
+                          timeout 180 apt-get -o Acquire::http::Proxy=http://apt-cache.registry.svc.cluster.local:3142 update
+                        }
+                        apt_install() {
+                          timeout 300 apt-get -o Acquire::http::Proxy=http://apt-cache.registry.svc.cluster.local:3142 install -y --no-install-recommends postgresql redis-server build-essential libpq-dev curl
+                        }
+                        for attempt in 1 2 3; do
+                          if apt_update && apt_install; then
+                            break
+                          fi
+                          [ "\${attempt}" -lt 3 ] || { echo "apt bootstrap failed after 3 bounded attempts" >&2; exit 1; }
+                          sleep "\$((attempt * 5))"
+                        done
+                        pg_ctlcluster -o "-c fsync=off -c synchronous_commit=off -c full_page_writes=off" 15 main start
+                        su postgres -c "psql -c \"ALTER USER postgres PASSWORD 'postgres';\""
+                        su postgres -c "createdb shizuha_pulse_ci" || true
+                        redis-server --daemonize yes
+                        # PLAT-5343: health gate — the backend suite's isolated
+                        # liveness client pings fail-loud, and both liveness legs
+                        # swallow store errors; racing an unbound sidecar turned
+                        # transient unavailability into a bare
+                        # assertIsNotNone(None) red (06f4dbf class). Wait bounded
+                        # for bind before the suite starts. Dependency-free on
+                        # purpose: bash /dev/tcp, no redis-cli (the review seat
+                        # flagged command availability as a fail-fast hypothesis).
+                        for i in \$(seq 1 20); do
+                          (exec 3<>/dev/tcp/127.0.0.1/6379) 2>/dev/null && break
+                          sleep 0.5
+                        done
+                        (exec 3<>/dev/tcp/127.0.0.1/6379) 2>/dev/null || {
+                          echo "::error::job-local redis-server not healthy after 10s (PLAT-5343)"
+                          exit 1
+                        }
+                        cd /workspace/src
+                        # Bootstrap the exact Dockerfile uv binary from the in-cluster
+                        # GHCR mirror. PyPI's large uv index can be stale/incomplete in
+                        # the pull-through cache, and public wheel downloads flake.
+                        case "\$(dpkg --print-architecture)" in
+                          amd64) UV_LAYER=sha256:a401c7628376e8180f9ffe67d26420e82f35ebfd6e50ef404b8530c8066a4dd0 ;;
+                          arm64) UV_LAYER=sha256:76772b95e73ee83cfedfafb4d4d535ad44f7a523150e95eea08f49dcba9098c5 ;;
+                          *) echo "unsupported architecture" >&2; exit 64 ;;
+                        esac
+                        curl -fsS --retry 5 --retry-all-errors --connect-timeout 10 --max-time 300 \
+                          "http://mirror-ghcr.registry.svc.cluster.local:5000/v2/astral-sh/uv/blobs/\${UV_LAYER}" \
+                          | tar -xz -C /usr/local/bin
+                        uv --version | grep -Eq '^uv 0\.11\.26([[:space:]]|$)'
+                        UV_CACHE_DIR=/tmp/uv-cache uv lock --check
+                        # Frozen uv sync otherwise follows files.pythonhosted URLs
+                        # embedded in uv.lock and bypasses this index. Preserve the
+                        # exact lock as hash-pinned requirements, then install those
+                        # names through the in-cluster artifact cache.
+                        uv export --frozen --no-dev --no-emit-project \
+                          --format requirements.txt --output-file /tmp/ci-requirements.txt
+                        uv venv --python python3 /workspace/src/.venv
+                        UV_CACHE_DIR=/tmp/uv-cache UV_HTTP_TIMEOUT=60 UV_HTTP_RETRIES=10 UV_CONCURRENT_DOWNLOADS=4 uv pip sync \
+                          --python /workspace/src/.venv/bin/python --require-hashes \
+                          /tmp/ci-requirements.txt \
+                          --index-url http://pip-cache.registry.svc.cluster.local/simple \
+                          --allow-insecure-host pip-cache.registry.svc.cluster.local
+                        # Django's multiprocessing runner needs tblib to return
+                        # worker tracebacks. Pin the long-cooled, dependency-free
+                        # helper and install it through the same cluster cache.
+                        UV_CACHE_DIR=/tmp/uv-cache UV_HTTP_TIMEOUT=300 uv pip install \
+                          --python /workspace/src/.venv/bin/python --no-deps 'tblib==1.7.0' \
+                          --index-url http://pip-cache.registry.svc.cluster.local/simple \
+                          --allow-insecure-host pip-cache.registry.svc.cluster.local
+                        # PLS-717: the root tests/ directory (deploy-workflow, security-CI,
+                        # MCP-contract tests) is pytest-based and was discovered by NO CI job.
+                        # Install pytest through the same cluster cache so the pytest step
+                        # below actually runs those files instead of them silently gating
+                        # nothing. pytest is NOT in the project's dependency graph, so install
+                        # it WITH its deps (pluggy/iniconfig/packaging/pygments) — a bare
+                        # --no-deps install leaves python -m pytest broken on pluggy.
+                        # NOTE: no backticks or dollar-parens in this comment — the manifest
+                        # heredoc is unquoted and bash would evaluate them as command substitution.
+                        UV_CACHE_DIR=/tmp/uv-cache UV_HTTP_TIMEOUT=300 uv pip install \
+                          --python /workspace/src/.venv/bin/python 'pytest==9.1.1' \
+                          --index-url http://pip-cache.registry.svc.cluster.local/simple \
+                          --allow-insecure-host pip-cache.registry.svc.cluster.local
+                        export PATH="/workspace/src/.venv/bin:${PATH}"
+                        export POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5432 POSTGRES_USER=postgres POSTGRES_PASSWORD=postgres POSTGRES_DB=shizuha_pulse_ci
+                        python scripts/check_hermetic_settings.py --self-test
+                        python scripts/check_hermetic_settings.py --settings-module taskmanager.test_settings --workflow .forgejo/workflows/deploy.yml
+                        # CELERY_BROKER_URL must point at the job-local redis: settings default
+                        # is localhost:7379 (nonexistent here) and every Item.save() post_save
+                        # signal opens a TimerManager redis connection — thousands of saves x
+                        # connection-retry latency pushed the suite past the 30min gate timeout
+                        # (PLS-207 audit, 2026-07-02).
+                        export REDIS_URL=redis://127.0.0.1:6379/5 CACHE_REDIS_URL=redis://127.0.0.1:6379/6 CELERY_BROKER_URL=redis://127.0.0.1:6379/7 CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/7 DEBUG=True SECRET_KEY=ci-secret JWT_SECRET_KEY=ci-secret SHIZUHA_JWT_SIGNING_KEY=ci-secret PULSE_SUBSTRATE_CAP_MODE=off
+                        # SCLI-376: token revocation is consulted for EVERY token type
+                        # (fail closed). The test Job has no shizuha-id deployment, so a
+                        # real consult to the default http://shizuha-id:8001 would fail
+                        # DNS and fail closed (false "revoked") on every valid token,
+                        # turning the whole suite into 401s. Stand up a local stub that
+                        # answers with the exact revocation-status contract
+                        # ({"active": true}) and point SHIZUHA_EXPECTED_ISSUER at it, so
+                        # the consult genuinely runs and returns active for test tokens.
+                        mkdir -p /tmp/revocation-stub
+                        cat > /tmp/revocation-stub/server.py <<'PY'
+                        import json
+                        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+                        class H(BaseHTTPRequestHandler):
+                            def do_POST(self):
+                                length = int(self.headers.get("Content-Length") or 0)
+                                self.rfile.read(length)
+                                body = json.dumps({"active": True}).encode()
+                                self.send_response(200)
+                                self.send_header("Content-Type", "application/json")
+                                self.send_header("Content-Length", str(len(body)))
+                                self.end_headers()
+                                self.wfile.write(body)
+                            def log_message(self, *args):
+                                pass
+
+                        HTTPServer(("127.0.0.1", 19999), H).serve_forever()
+                        PY
+                        python3 /tmp/revocation-stub/server.py &
+                        REVOCATION_STUB_PID=\$!
+                        trap 'kill \${REVOCATION_STUB_PID} >/dev/null 2>&1 || true' EXIT
+                        for i in \$(seq 1 10); do
+                          if curl -fsS -X POST -d '{}' http://127.0.0.1:19999/api/oauth/revocation-status >/dev/null 2>&1; then break; fi
+                          sleep 1
+                        done
+                        export SHIZUHA_EXPECTED_ISSUER=http://127.0.0.1:19999
+                        # PLS-229: scope discovery to the tasks app (the only Django app;
+                        # all real backend tests live under tasks/). Default manage.py test
+                        # discovery starts at repo root and collects invalid root scripts —
+                        # test_quickrem.py (a shell command saved as .py -> SyntaxError) and
+                        # pytest-based test_plat419_*/test_plat855_* (pytest not in requirements
+                        # -> ModuleNotFoundError). Full non-failfast discovery then keeps running
+                        # after those import errors and OOMKills (137) at 16Gi BEFORE printing the
+                        # unittest summary, masking the real failures. Scoping + --failfast makes
+                        # the gate fail fast with a visible failure instead of an OOM.
+                        # ORIG-11: cap glibc malloc arenas. The suite spawns many threads
+                        # (urllib3 connection pools — user_service/notifications retry the
+                        # :9 discard sentinel), and glibc allocates up to 8*ncpu 64MB arenas,
+                        # one per thread, inflating RSS by GBs on the many-core GB10 nodes.
+                        # MALLOC_ARENA_MAX=2 collapses that phantom RSS with no test impact.
+                        export MALLOC_ARENA_MAX=2
+                        # --keepdb: teardown destroy_test_db races with leftover connections
+                        # (OperationalError: test DB accessed by other users) and fails the
+                        # Job after the suite already printed OK — blocking pulse API deploy.
+                        # Match the mandatory local gate's proven worker budget. The suite has
+                        # grown past the serial 30-minute gate, while eight isolated Django DB
+                        # clones preserve the same assertions and finish within the CI budget.
+                        # The pinned tblib bootstrap above keeps worker tracebacks intact.
+                        export TEST_JOBS=8
+                        # PLAT-8484: run the deploy gate's incident-boundary leg
+                        # FIRST so a tenant leak / authz-scope drift fails fast on
+                        # the PR, before merge — not discovered post-merge on the
+                        # deploy lane (06f4dbf: 30m production deploy block).
+                        # Mirrors deploy.yml's static authz-scope invariant +
+                        # live tenant-isolation probe + scope checker. The probe
+                        # test is hermetic (in-memory, no live credentials).
+                        python -m unittest -q \
+                          test_scripts.test_check_drf_authz_scope \
+                          test_scripts.test_live_pulse_tenant_isolation_probe
+                        python scripts/check_drf_authz_scope.py
+                        python tests/test_explicit_credential_configuration.py
+                        python manage.py check --settings=taskmanager.test_settings
+                        python manage.py makemigrations --check --dry-run \
+                          --settings=taskmanager.test_settings
+                        # PLS-717: alertdelivery is a second Django app whose
+                        # tests/ (PLAT-5928 delivery regressions) were discovered by
+                        # NO CI job — the guard caught it. Include it in the scope so
+                        # those tests actually gate.
+                        python manage.py test tasks alertdelivery --settings=taskmanager.test_settings \
+                          --noinput --failfast --keepdb --parallel "\${TEST_JOBS}"
+                        # PLS-717: the root tests/ directory was discovered by NO CI job —
+                        # deploy-workflow/security-CI/MCP-contract tests were committed,
+                        # reviewed, and never executed. Run them here (pytest installed
+                        # above) so they actually gate. These are stdlib-only static
+                        # workflow tests; they do not need Postgres/Redis.
+                        python -m pytest tests/ -q
+                        # PLS-717 AC3 guard: every test file must live in a path a required
+                        # CI job discovers (tasks/tests/ via manage.py test tasks, or the
+                        # root tests/ via the pytest step above). A test file added anywhere
+                        # else would silently gate nothing — fail the gate instead.
+                        python scripts/check_test_discovery.py
+                    # PLS-209: 1061 tests + pg + redis in one pod; without a request the
+                    # pod lands on a pressured node and gets SIGKILLed (exit 137).
+                    # PLAT-1219 follow-up: 6Gi limit still OOMKilled (run 1154, node at 12%
+                    # memory) — apt/pip page cache + emptyDir dirty pages + pg + suite all
+                    # count against the one cgroup. GB10 nodes have 119Gi; 16Gi is cheap.
+                    # ORIG-11: the growing suite (id-39 consumer, PLS-230, +others) OOMKilled
+                    # at 16Gi (runs 1237/prev) — bumped to 24Gi + MALLOC_ARENA_MAX=2 above.
+                    resources:
+                      requests: { memory: 6Gi, cpu: "1" }
+                      limits: { memory: 24Gi }
+                    volumeMounts: [{ mountPath: /workspace, name: workspace }]
+                volumes: [{ emptyDir: {}, name: workspace }]
+          YAML
+
+          # PLS-207/PLAT-1219: `kubectl wait --for=condition=complete` NEVER returns on a
+          # FAILED job — a failing suite hung the gate for the full 30min while the job's
+          # ttlSecondsAfterFinished reaped it, so the log dump hit NotFound and the actual
+          # test failures were unrecoverable. Poll for Complete OR Failed instead, and dump
+          # the suite output while the pod still exists.
+          DEADLINE=$(( $(date +%s) + 1800 ))
+          while true; do
+            COMPLETE="$(kubectl get job -n build "${JOB}" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || true)"
+            FAILED="$(kubectl get job -n build "${JOB}" -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)"
+            [ "${COMPLETE}" = "True" ] && break
+            if [ "${FAILED}" = "True" ]; then
+              echo "::error::backend test gate failed — suite output follows"
+              # PLS-1286-ops: a Job can go Failed while its pod is still PodInitializing
+              # (init/checkout fast-fail). `kubectl logs --all-containers` then returns
+              # BadRequest (no log file yet) and the dump is blind to exactly that shape.
+              # Describe the pod + init container states BEFORE the logs call: the Events
+              # section names the ~20s init death (image pull / secret mount / clone exit).
+              POD="$(kubectl get pods -n build -l job-name="${JOB}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+              kubectl -n build describe pod "${POD}" 2>/dev/null | tail -80 || true
+              kubectl -n build get pod "${POD}" -o jsonpath='{range .status.initContainerStatuses[*]}{.name}{" "}{.state}{" "}{.lastState}{"\n"}{end}' 2>/dev/null || true
+              kubectl logs -n build "job/${JOB}" --all-containers --tail=4000 || true
+              exit 1
+            fi
+            if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
+              echo "::error::backend test gate timed out after 1800s"
+              POD="$(kubectl get pods -n build -l job-name="${JOB}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+              kubectl -n build describe pod "${POD}" 2>/dev/null | tail -80 || true
+              kubectl -n build get pod "${POD}" -o jsonpath='{range .status.initContainerStatuses[*]}{.name}{" "}{.state}{" "}{.lastState}{"\n"}{end}' 2>/dev/null || true
+              kubectl logs -n build "job/${JOB}" --all-containers --tail=4000 || true
+              exit 1
+            fi
+            sleep 10
+          done
+
+          kubectl logs -n build "job/${JOB}" --all-containers --tail=4000 || true
