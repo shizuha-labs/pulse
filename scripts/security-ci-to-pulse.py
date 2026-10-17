@@ -1187,7 +1187,22 @@ def pulse_upsert_ledger(
         ref = str(existing.get("item_key") or existing.get("id"))
         labels = [l for l in (existing.get("labels") or []) if isinstance(l, str)]
         if hash_label in labels:
-            return f"ledger-unchanged:{ref}"
+            # PLAT-10280: unchanged findings must still refresh the row.
+            # A comment leaves Last scan citing the old run (the defect) and
+            # accumulates comments the ledger contract forbids. The description
+            # carries the live ref/sha/run; a failed write fails the run.
+            try:
+                pulse_request(
+                    "PATCH", f"{api_base}/items/{existing.get('id') or ref}/", token,
+                    {"description": description,
+                     "append_origin_observations": [origin_observation(args)]},
+                )
+            except Exception as exc:
+                print(f"WARN: ledger citation PATCH failed for {ref}: {exc}", file=sys.stderr)
+                raise RuntimeError(
+                    f"ledger citation refresh failed for {ref}: {exc}"
+                ) from exc
+            return f"ledger-updated:{ref}"
         new_labels = [
             l for l in labels
             if not l.startswith("ledger-hash:") and l != "durable-write-failed"

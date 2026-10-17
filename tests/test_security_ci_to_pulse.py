@@ -1779,3 +1779,81 @@ def test_fresh_findings_onto_all_archived_repo_still_skip_and_refuse(monkeypatch
     err = capsys.readouterr().err
     assert "SKIP stale-gen ledger replay" in err
     assert "PLAT-OLD(completed)" in err and "PLAT-NEWER(completed)" in err
+
+
+def test_unchanged_ledger_hash_refreshes_row_not_comment(monkeypatch):
+    """PLAT-10280: same finding hash must still rewrite Last scan on the row.
+
+    A comment-only citation leaves the description citing the previous run.
+    The write must fail the scan if Pulse rejects the PATCH.
+    """
+    import hashlib
+    module = load_module()
+    args = _ledger_args(sha="be1e2d3d", run_url="https://origin.shizuha.com/runs/79485")
+    wiki = module.WikiLedgerResult(
+        ok=True, page_url="https://wiki.example/ledger", page_id="ledger-page", action="updated",
+    )
+    digest = hashlib.sha256(f"\nwiki:ok:{wiki.page_id}".encode()).hexdigest()[:12]
+    patches = []
+    comments = []
+
+    def fake_request(method, url, token, body=None):
+        if method == "GET" and "/items/?" in url:
+            return {"results": [{
+                "id": "rollup-id",
+                "item_key": "PLAT-7684",
+                "labels": ["security-ci", "security-ci:ledger", f"ledger-hash:{digest}"],
+            }]}
+        if method == "GET":
+            return {
+                "id": "rollup-id",
+                "item_key": "PLAT-7684",
+                "source_id": "security-ci:shizuha-labs/deploy:ledger",
+                "status": "in_progress",
+                "status_category": "in_progress",
+                "labels": ["security-ci", "security-ci:ledger", f"ledger-hash:{digest}"],
+            }
+        if method == "PATCH":
+            patches.append(body)
+            return {"item_key": "PLAT-7684"}
+        raise AssertionError((method, url, body))
+
+    monkeypatch.setattr(module, "pulse_request", fake_request)
+    monkeypatch.setattr(module, "pulse_comment", lambda *a, **k: comments.append(a))
+    result = module.pulse_upsert_ledger("http://pulse/api", "tok", [], args, wiki)
+    assert result == "ledger-updated:PLAT-7684"
+    assert comments == []
+    assert len(patches) == 1
+    assert "be1e2d3d" in patches[0]["description"]
+    assert "runs/79485" in patches[0]["description"]
+    assert patches[0]["append_origin_observations"]
+
+
+def test_unchanged_ledger_hash_patch_failure_fails_loud(monkeypatch):
+    import hashlib
+    module = load_module()
+    args = _ledger_args()
+    wiki = module.WikiLedgerResult(ok=True, page_id="ledger-page", page_url="https://wiki.example/l", action="updated")
+    digest = hashlib.sha256(f"\nwiki:ok:{wiki.page_id}".encode()).hexdigest()[:12]
+
+    def fake_request(method, url, token, body=None):
+        if method == "GET" and "/items/?" in url:
+            return {"results": [{"id": "rollup-id", "item_key": "PLAT-7684",
+                                 "labels": [f"ledger-hash:{digest}"]}]}
+        if method == "GET":
+            return {
+                "id": "rollup-id", "item_key": "PLAT-7684",
+                "source_id": "security-ci:shizuha-labs/deploy:ledger",
+                "status": "in_progress", "status_category": "in_progress",
+                "labels": [f"ledger-hash:{digest}"],
+            }
+        if method == "PATCH":
+            raise RuntimeError("PATCH Pulse item -> HTTP 500")
+        raise AssertionError((method, url))
+
+    monkeypatch.setattr(module, "pulse_request", fake_request)
+    try:
+        module.pulse_upsert_ledger("http://pulse/api", "tok", [], args, wiki)
+        raise AssertionError("expected citation refresh to fail loud")
+    except RuntimeError as exc:
+        assert "citation refresh failed" in str(exc)
