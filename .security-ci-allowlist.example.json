@@ -1,0 +1,14 @@
+{
+  "allowlist": [
+    {
+      "source_id": "security-ci:<stable id from CI output>",
+      "tool": "semgrep",
+      "rule": "example.rule.id",
+      "disposition": "accepted-false-positive",
+      "reason": "accepted false-positive; include why it is safe",
+      "owner": "security@shizuha.com",
+      "approved_by": "security@shizuha.com",
+      "expires": "2099-12-31"
+    }
+  ]
+}

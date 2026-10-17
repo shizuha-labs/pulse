@@ -1,0 +1,22 @@
+# Playwright Test Runner for Shizuha Pulse
+FROM mcr.microsoft.com/playwright:v1.41.0-jammy
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+COPY vendor/ ./vendor/
+
+# Install dependencies
+RUN npm ci
+
+# Copy test files
+COPY playwright.config.js ./
+COPY tests/ ./tests/
+
+# Set environment variables
+ENV BASE_URL=http://host.docker.internal:8002/pulse
+ENV API_URL=http://host.docker.internal:8002/pulse/api
+
+# Default command runs all tests
+CMD ["npx", "playwright", "test"]

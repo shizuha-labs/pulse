@@ -1,0 +1,87 @@
+{
+  "name": "shizuha-pulse-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint src --ext js,jsx --report-unused-disable-directives --max-warnings 0",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:debug": "playwright test --debug",
+    "test:e2e:report": "playwright show-report",
+    "test:unit": "node tests/unit/derive-organizations.test.mjs && node tests/unit/authSession.test.mjs && node tests/unit/workflowOperation.test.mjs && node tests/unit/moveTaskOnBoard.test.mjs",
+    "test:dashboard": "node tests/unit/dashboardMetrics.test.mjs",
+    "prebuild": "npm run test:dashboard && npm run test:security",
+    "test:security": "node tests/security/axios-http.test.mjs && node tests/security/markdown-linkify.test.mjs && node tests/security/tooling-parsers.test.mjs"
+  },
+  "dependencies": {
+    "@sentry/react": "^7.120.4",
+    "@shizuha/ui": "file:vendor/ui.tgz",
+    "@tanstack/react-query": "^5.17.0",
+    "@tiptap/extension-image": "^3.19.0",
+    "@tiptap/extension-link": "^3.19.0",
+    "@tiptap/extension-mention": "^3.19.0",
+    "@tiptap/extension-placeholder": "^3.19.0",
+    "@tiptap/extension-table": "^3.22.3",
+    "@tiptap/extension-table-cell": "^3.22.3",
+    "@tiptap/extension-table-header": "^3.22.3",
+    "@tiptap/extension-table-row": "^3.22.3",
+    "@tiptap/react": "^3.19.0",
+    "@tiptap/starter-kit": "^3.19.0",
+    "@tiptap/suggestion": "^3.19.0",
+    "axios": "^1.20.0",
+    "clsx": "^2.1.0",
+    "date-fns": "^3.2.0",
+    "lucide-react": "^0.303.0",
+    "markdown-it": "^14.3.1",
+    "playwright": "^1.58.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^7.18.2",
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^2.2.0",
+    "tippy.js": "^6.3.7"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.1",
+    "@tailwindcss/typography": "^0.5.10",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.16",
+    "eslint": "^8.55.0",
+    "eslint-plugin-react": "^7.33.2",
+    "eslint-plugin-react-hooks": "^4.6.0",
+    "eslint-plugin-react-refresh": "^0.4.5",
+    "postcss": "^8.5.23",
+    "tailwindcss": "^3.4.0",
+    "vite": "^6.4.3"
+  },
+  "overrides": {
+    "brace-expansion": "^1.1.21",
+    "flatted": "3.4.2",
+    "follow-redirects": "^1.16.0",
+    "form-data": "^4.0.6",
+    "linkify-it": "^5.0.2",
+    "markdown-it": "$markdown-it",
+    "js-yaml": "^4.3.2",
+    "ajv": "^6.14.0",
+    "anymatch": {
+      "picomatch": "^2.3.2"
+    },
+    "micromatch": {
+      "picomatch": "^2.3.2"
+    },
+    "readdirp": {
+      "picomatch": "^2.3.2"
+    },
+    "tinyglobby": {
+      "picomatch": "^4.0.5"
+    }
+  }
+}

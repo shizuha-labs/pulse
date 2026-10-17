@@ -1,0 +1,38 @@
+#!/bin/bash
+# Shizuha local CI gate (operator 2026-07-12): pushing to main/master is
+# IMPOSSIBLE unless the repo's CI-equivalent test suite passes locally.
+# Two ring-wedges in one day were caused by red-on-main pushes; the doctrine
+# (verify-before-push) is now mechanical, not optional.
+#
+# Bypass ONLY for a genuine emergency (logged loudly):
+#   SHIZUHA_PUSH_UNSAFE=1 git push ...
+set -u
+gate_needed=0
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  case "$remote_ref" in
+    refs/heads/main|refs/heads/master) gate_needed=1 ;;
+  esac
+done
+[ "$gate_needed" = 1 ] || exit 0
+
+if [ "${SHIZUHA_PUSH_UNSAFE:-}" = "1" ]; then
+  echo "!!! SHIZUHA_PUSH_UNSAFE=1 — CI gate BYPASSED for a primary-branch push. This is audited; justify it in the commit/task." >&2
+  exit 0
+fi
+
+repo_root=$(git rev-parse --show-toplevel)
+gate="$repo_root/.ci-local-gate.sh"
+if [ ! -x "$gate" ]; then
+  echo "pre-push: no .ci-local-gate.sh in this repo — allowing push (add one to gate it)." >&2
+  exit 0
+fi
+echo ">>> local CI gate: running $(basename "$gate") before primary-branch push..." >&2
+if ! "$gate"; then
+  echo "" >&2
+  echo "XXX PUSH BLOCKED: local CI gate FAILED. Fix the tests (or the code) first." >&2
+  echo "    A red main wedges the deploy ring for every later commit." >&2
+  echo "    Emergency bypass (audited): SHIZUHA_PUSH_UNSAFE=1 git push" >&2
+  exit 1
+fi
+echo ">>> local CI gate PASSED — pushing." >&2
+exit 0

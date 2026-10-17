@@ -1,0 +1,5 @@
+FROM gx10-1:30500/shizuha-pulse:amd64-main-b5e953d
+WORKDIR /app
+COPY tasks/ /app/tasks/
+COPY mcp-server/ /app/mcp-server/
+RUN python manage.py collectstatic --noinput || true

@@ -1,0 +1,240 @@
+# Shizuha Origin CI — MCP tool ↔ serializer contract tests (PLAT-1355).
+# Runs the MCP payload/serializer contract suite (+ the mcp-server regression
+# tests) on every push/PR so tool-vs-serializer drift (ID-38/PLS-224/PLAT-1171
+# class; AT-84/PLAT-48 locally) fails BEFORE deployment. Test-only — never
+# builds or deploys an image. Mirrors the connect migration-gate harness: a
+# runner job launches an in-cluster k8s Job (postgres + requirements + tests),
+# authenticated with the org KUBE_CONFIG_B64 + github-token secrets.
+name: mcp-contract-tests
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main, master]
+  pull_request:
+concurrency:
+  group: mcp-contract-tests-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  contract-tests:
+    # PLS-1018: fork-PR push-event runs on refs/pull/*/head receive NO secrets
+    # (empty Authorization/kubeconfig) and fail in seconds. Their failing commit
+    # status overrides the green pull_request run for the same context, blocking
+    # the merge gate on reviewed fork PRs. Skip push runs on fork-PR head refs;
+    # the pull_request runs (which DO get secrets) remain authoritative.
+    if: github.event_name != 'push' || !startsWith(github.ref, 'refs/pull/')
+    # This test-only orchestrator must not consume rollout capacity. The
+    # isolated Kubernetes Job remains the test boundary.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install kubectl + cluster access
+        run: |
+          set -euo pipefail
+          KUBECTL_ARCH="$(uname -m)"; case "$KUBECTL_ARCH" in x86_64) KUBECTL_ARCH=amd64;; aarch64) KUBECTL_ARCH=arm64;; esac
+          case "$KUBECTL_ARCH" in
+            amd64) KUBECTL_SHA=7721f265e18709862655affba5343e85e1980639395d5754473dafaadcaa69e3 ;;
+            arm64) KUBECTL_SHA=420e6110e3ba7ee5a3927b5af868d18df17aae36b720529ffa4e9e945aa95450 ;;
+          esac
+          # anonymous-fetch: sanctioned — adding Authorization can turn this public package fetch into 401 (ORIG-144)
+          curl --retry 3 --retry-all-errors --retry-delay 1 --max-time 60 -fsSL \
+            -o kubectl "http://forgejo-http.origin.svc.cluster.local/api/packages/actions/generic/kubectl/v1.34.1/kubectl-${KUBECTL_ARCH}"
+          echo "$KUBECTL_SHA  kubectl" | sha256sum -c -
+          install -m 0755 kubectl /usr/local/bin/kubectl
+          mkdir -p "$HOME/.kube"
+          printf '%s' "${{ secrets.KUBE_CONFIG_B64 }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+      - name: Run MCP contract tests in-cluster
+        run: |
+          set -euo pipefail
+          SHORT="$(echo "${{ github.sha }}" | cut -c1-7)"
+          JOB="ci-mcp-contract-tasks-${SHORT}"
+          kubectl delete job -n build "${JOB}" --ignore-not-found
+          cleanup() {
+            kubectl delete job -n build "${JOB}" --ignore-not-found
+          }
+          trap cleanup EXIT
+          cat <<YAML | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${JOB}
+            namespace: build
+            labels: { app: ci-mcp-contract, service: pulse, shizuha.io/task: PLAT-1355 }
+          spec:
+            backoffLimit: 0
+            # ORIG-11 2026-07-16: the CI gate stops polling at its timeout, but a
+            # wedged suite pod (e.g. apt hung through the cache proxy during a
+            # gx->s1 stall, PLAT-4692) runs forever and leaks its memory request
+            # (three such pods found Running 10-15h). Reap the Job shortly after
+            # the gate has given up; ttl only applies once the Job finishes.
+            activeDeadlineSeconds: 1500
+            ttlSecondsAfterFinished: 900
+            template:
+              spec:
+                restartPolicy: Never
+                initContainers:
+                  - name: git-clone
+                    # Canonical Docker Hub identity: host containerd routes it
+                    # through the declarative node-local mirror (PLAT-4696).
+                    # Pin the multi-arch list so a mutable tag cannot create a
+                    # node/cache-dependent contract lane (PLAT-5145).
+                    image: docker.io/alpine/git:2.43.0@sha256:76fdb7210689fc26c6ff101c4adacf9d12d3d25a919a7d8ff42ebaef5bedba65
+                    imagePullPolicy: IfNotPresent
+                    command: ["/bin/sh","-c"]
+                    args:
+                      - |
+                        set -e
+                        git clone --depth=50 http://x-token-auth:\${GIT_PASSWORD}@forgejo-http.origin.svc.cluster.local/${{ github.repository }}.git /workspace/src
+                        cd /workspace/src
+                        git fetch --depth=1 origin ${{ github.sha }}
+                        git checkout --detach ${{ github.sha }}
+                    env:
+                      - name: GIT_PASSWORD
+                        valueFrom: { secretKeyRef: { name: forgejo-token, key: password } }
+                    volumeMounts: [{ mountPath: /workspace, name: workspace }]
+                containers:
+                  - name: contract-tests
+                    image: docker.io/library/python:3.12-bookworm@sha256:9bed8554e926c07c6f908841d5ee88c33e8df9236b191526bbce81a9062ab43a
+                    imagePullPolicy: IfNotPresent
+                    command: ["/bin/bash","-lc"]
+                    args:
+                      - |
+                        set -euo pipefail
+                        export DEBIAN_FRONTEND=noninteractive
+                        printf '%s\n' \
+                          'Acquire::http::Proxy "http://apt-cache.registry.svc.cluster.local:3142";' \
+                          'Acquire::Retries "10";' \
+                          'Acquire::http::Timeout "30";' \
+                          > /etc/apt/apt.conf.d/01proxy
+                        apt_update() {
+                          # PLAT-4905 (recurrence of PLS-506): a corrupt/stale partial
+                          # InRelease leaves apt's http+gpgv workers alive forever despite
+                          # the Acquire timeouts, wedging the contract lane until the 1500s
+                          # Job deadline. Bound the whole command and discard only the
+                          # job-local partials so the retry sees a clean state.
+                          rm -f /var/lib/apt/lists/partial/*
+                          timeout 180 apt-get -o Acquire::http::Proxy=http://apt-cache.registry.svc.cluster.local:3142 update
+                        }
+                        apt_install() {
+                          timeout 300 apt-get -o Acquire::http::Proxy=http://apt-cache.registry.svc.cluster.local:3142 install -y --no-install-recommends postgresql build-essential libpq-dev curl
+                        }
+                        for attempt in 1 2 3; do
+                          if apt_update && apt_install; then
+                            break
+                          fi
+                          [ "\${attempt}" -lt 3 ] || { echo "apt bootstrap failed after 3 bounded attempts" >&2; exit 1; }
+                          sleep "\$((attempt * 5))"
+                        done
+                        pg_ctlcluster -o "-c fsync=off -c synchronous_commit=off -c full_page_writes=off" 15 main start
+                        su postgres -c "psql -c \"ALTER USER postgres PASSWORD 'postgres';\""
+                        su postgres -c "createdb shizuha_pulse_ci" || true
+                        cd /workspace/src
+                        case "\$(dpkg --print-architecture)" in
+                          amd64) UV_LAYER=sha256:a401c7628376e8180f9ffe67d26420e82f35ebfd6e50ef404b8530c8066a4dd0 ;;
+                          arm64) UV_LAYER=sha256:76772b95e73ee83cfedfafb4d4d535ad44f7a523150e95eea08f49dcba9098c5 ;;
+                          *) echo "unsupported architecture" >&2; exit 64 ;;
+                        esac
+                        curl -fsS --retry 5 --retry-all-errors --connect-timeout 10 --max-time 300 \
+                          "http://mirror-ghcr.registry.svc.cluster.local:5000/v2/astral-sh/uv/blobs/\${UV_LAYER}" \
+                          | tar -xz -C /usr/local/bin
+                        uv --version | grep -Eq '^uv 0\.11\.26([[:space:]]|$)'
+                        # PLAT-1302: uv.lock contains direct pythonhosted artifact
+                        # URLs, so frozen sync bypasses --index-url. Export the
+                        # exact lock as hash-pinned requirements and install those
+                        # through the in-cluster wheel cache instead.
+                        uv export --frozen --no-dev --no-emit-project \
+                          --format requirements.txt --output-file /tmp/ci-requirements.txt
+                        uv venv --python python3 /workspace/src/.venv
+                        UV_CACHE_DIR=/tmp/uv-cache UV_HTTP_TIMEOUT=60 UV_HTTP_RETRIES=10 UV_CONCURRENT_DOWNLOADS=4 uv pip sync \
+                          --python /workspace/src/.venv/bin/python --require-hashes \
+                          /tmp/ci-requirements.txt \
+                          --index-url http://pip-cache.registry.svc.cluster.local/simple \
+                          --allow-insecure-host pip-cache.registry.svc.cluster.local
+                        export PATH="/workspace/src/.venv/bin:${PATH}"
+                        uv pip install --index-url http://pip-cache.registry.svc.cluster.local/simple --trusted-host pip-cache.registry.svc.cluster.local -r mcp-server/requirements.txt
+                        export POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5432 POSTGRES_USER=postgres POSTGRES_PASSWORD=postgres POSTGRES_DB=shizuha_pulse_ci
+                        export SECRET_KEY=ci-secret DEBUG=True SHIZUHA_PULSE_URL=http://localhost:8002/pulse/api PULSE_SUBSTRATE_CAP_MODE=off
+                        # The historical MCP fixtures model first-party host aliases.
+                        # Production trust anchors have no first-party source defaults.
+                        export ORIGIN_PUBLIC_URL=https://origin.shizuha.com
+                        export ORIGIN_PUBLIC_HOST_ALIASES=origin.shizuha
+                        export ORIGIN_INTERNAL_HOST_ALIASES=forgejo-http.origin.svc,forgejo-http.origin.svc.cluster.local
+                        export ORIGIN_LEGACY_HOST_ALIASES=git.shizuha.com
+                        export ORIGIN_CI_LOGS_URL=http://ci-logs.origin.svc.cluster.local:8080/logs
+                        export PULSE_FROZEN_DEVELOPMENT_REPOS='{"shizuha-labs/shizuha":"Origin shizuha-labs/shizuha is frozen (2026-08-15). CLI/harness development SoT is origin.shizuha.com/shizuha-labs/shizuha-beta. Clone, branch, open, and link PRs on shizuha-beta only."}'
+                        export PULSE_OPERATOR_EMAIL=operator@example.test PULSE_COS_EMAIL=shizuha@shizuha.com
+                        export PULSE_SUPPRESSED_THERMAL_HOSTS=gx10-4,10.200.10.4
+                        # (1) The MCP↔serializer contract suite (PLAT-1355).
+                        python manage.py test tasks.tests.test_mcp_schema_contract --verbosity 2
+                        # (2) The standalone mcp-server payload regression tests (AT-84, PLAT-48, PLS-523).
+                        cd mcp-server && python -m unittest \
+                          test_work_logs \
+                          test_link_issues \
+                          test_deploy_verify_waiver \
+                          test_plat4675_link_pr_host_binding \
+                          test_plat1004_classifier_guard \
+                          test_pls496_origin_link_pr \
+                          test_pls574_propose_project_binding \
+                          test_pls523_error_markers \
+                          test_pls858_error_message \
+                          test_pls840_no_pr_declaration \
+                          test_token_verifier \
+                          test_pls834_singular_link_pr \
+                          test_pls834_forgejo_host_variant \
+                          test_far_future_due \
+                          test_pls405_limit_after_visibility \
+                          test_pls838_hidden_due_annotation \
+                          test_pls862_accounting \
+                          test_scheduled_not_actionable \
+                          test_pls464_ready_movable_split \
+                          test_my_work \
+                          test_human_wait_settlement \
+                          test_deferred_workflow_transition \
+                          test_pls756_cancel_discovery \
+                          test_pls518_pinned_current_state \
+                          -v
+                    volumeMounts: [{ mountPath: /workspace, name: workspace }]
+                volumes: [{ emptyDir: {}, name: workspace }]
+          YAML
+          # A Pod with an unpullable image remains Pending, so neither Job
+          # Complete nor Failed becomes true. Poll the actual waiting state and
+          # preserve its reason/message before cleanup instead of burning the
+          # full suite timeout and then asking logs from a container that never
+          # started (run 2524 / PLAT-5145).
+          DEADLINE=$((SECONDS + 1200))
+          PULL_FAILURE_SINCE=0
+          PULL_FAILURE=""
+          while [ "${SECONDS}" -lt "${DEADLINE}" ]; do
+            if kubectl get job -n build "${JOB}" -o jsonpath='{.status.succeeded}' | grep -q 1; then
+              break
+            fi
+            if kubectl get job -n build "${JOB}" -o jsonpath='{.status.failed}' | grep -Eq '^[1-9]'; then
+              break
+            fi
+
+            POD="$(kubectl get pods -n build -l "job-name=${JOB}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+            if [ -n "${POD}" ]; then
+              WAITING="$(kubectl get pod -n build "${POD}" -o go-template='{{range .status.initContainerStatuses}}{{if .state.waiting}}{{.name}}|{{.state.waiting.reason}}|{{.state.waiting.message}}{{"\n"}}{{end}}{{end}}{{range .status.containerStatuses}}{{if .state.waiting}}{{.name}}|{{.state.waiting.reason}}|{{.state.waiting.message}}{{"\n"}}{{end}}{{end}}' 2>/dev/null || true)"
+              PULL_FAILURE="$(printf '%s\n' "${WAITING}" | awk -F '|' '$2 == "ErrImagePull" || $2 == "ImagePullBackOff" || $2 == "InvalidImageName" { print; exit }')"
+              if [ -n "${PULL_FAILURE}" ]; then
+                if [ "${PULL_FAILURE_SINCE}" -eq 0 ]; then
+                  PULL_FAILURE_SINCE=${SECONDS}
+                fi
+                if printf '%s\n' "${PULL_FAILURE}" | grep -q '|InvalidImageName|' \
+                  || [ $((SECONDS - PULL_FAILURE_SINCE)) -ge 60 ]; then
+                  echo "CI_IMAGE_PULL_FAILED: workflow=mcp-contract-tests.yml job=${JOB} pod=${POD} waiting=${PULL_FAILURE}" >&2
+                  kubectl describe pod -n build "${POD}" || true
+                  break
+                fi
+              else
+                PULL_FAILURE_SINCE=0
+              fi
+            fi
+            sleep 5
+          done
+          kubectl logs -n build "job/${JOB}" --tail=200 || true
+          if kubectl get job -n build "${JOB}" -o jsonpath='{.status.succeeded}' | grep -q 1; then
+            echo "MCP contract tests passed."
+          else
+            echo "MCP contract tests FAILED — see logs above."
+            exit 1
+          fi

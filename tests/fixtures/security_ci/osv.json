@@ -1,0 +1,1 @@
+{"results":[{"source":{"path":"package-lock.json"},"packages":[{"package":{"name":"demo"},"vulnerabilities":[{"id":"GHSA-xxxx-yyyy","summary":"demo vulnerable package","severity":[{"type":"CVSS_V3","score":"9.8"}],"references":[{"url":"https://osv.dev/"}]}]}]}]}

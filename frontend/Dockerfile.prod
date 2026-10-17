@@ -1,0 +1,57 @@
+# =============================================================================
+# Production Dockerfile for Shizuha Frontend
+# =============================================================================
+# Multi-stage build: Build static files, then serve with nginx
+# NO HMR, NO Vite dev server - optimized static files only
+#
+# Build args (set via docker-compose):
+#   VITE_BASE_PATH - e.g., /pulse/
+#   VITE_API_BASE - e.g., /pulse/api
+#   FRONTEND_PATH - e.g., shizuha-pulse/frontend (relative to monorepo root)
+#
+# Context: workspace root; CI standalone builds use Dockerfile.ci.
+# =============================================================================
+
+# Stage 1: Build
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Build arg for frontend path (relative to monorepo root)
+ARG FRONTEND_PATH=pulse/frontend
+
+# Install dependencies from the reviewed lock and local package artifacts.
+COPY ${FRONTEND_PATH}/package*.json ./
+COPY ${FRONTEND_PATH}/vendor/ ./vendor/
+RUN npm ci --no-audit --no-fund
+
+# Copy source
+COPY ${FRONTEND_PATH}/ .
+
+# Build args for Vite
+ARG VITE_BASE_PATH=/
+ARG VITE_API_BASE=/api
+ENV VITE_BASE_PATH=$VITE_BASE_PATH
+ENV VITE_API_BASE=$VITE_API_BASE
+ENV NODE_ENV=production
+
+# Build static files
+RUN npm run build
+
+# Stage 2: Serve with nginx
+FROM nginx:alpine
+
+# Copy custom nginx config from builder stage
+COPY --from=builder /app/nginx.prod.conf /etc/nginx/conf.d/default.conf
+
+# Copy built static files
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+# Expose port 80
+EXPOSE 80
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1/health || exit 1
+
+CMD ["nginx", "-g", "daemon off;"]
