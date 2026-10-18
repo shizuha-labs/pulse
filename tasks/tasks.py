@@ -2071,6 +2071,90 @@ def _run_workflow_stale_timers(now=None):
 # heartbeat (hb TTL-expired) is never protected — that is the truly hard-off path.
 _SOFT_UNAVAILABILITY_REASONS = frozenset({'provider_down', 'capacity_limited', 'offline'})
 
+# PLAT-11803: the PLAT-999 Path A named co-signer set — the identity-bound
+# authority for privileged/cortex merges. Identity-bound cards fail over only
+# within this set (sora ↔ aoi); they are never rerouted to a non-co-signer
+# because only a set identity can green `privileged-merge-gate / validate`.
+# Configurable via settings (PLAT-999 named co-signers) with this default.
+_PLAT_999_NAMED_COSIGNERS = frozenset({
+    'sora@agents.shizuha.io',
+    'aoi@agents.shizuha.io',
+})
+
+
+def _plat999_named_cosigner_emails():
+    from django.conf import settings as _s
+    configured = getattr(_s, 'PLAT_999_NAMED_COSIGNERS', None)
+    if configured:
+        try:
+            emails = {str(e).strip().lower() for e in configured}
+        except TypeError:
+            emails = set()
+        if emails:
+            return emails
+    return _PLAT_999_NAMED_COSIGNERS
+
+
+def _resolve_plat999_cosigner_failover_target(item, health):
+    """Pick a co-signer-set failover target for an identity-bound card.
+
+    PLAT-11803 fix contract: failover only within the named co-signer set.
+    Candidates are set members other than the current assignee whose lane is
+    `active` per the health map. Returns (uid, email) or (None, None) when no
+    set member is active — the caller keeps the assignee and raises a wake
+    signal instead (never reroutes to a non-co-signer).
+    """
+    from .user_service import user_service
+
+    def short(email):
+        email = (email or '').strip().lower()
+        if email.endswith('@agents.shizuha.io'):
+            return email[:-len('@agents.shizuha.io')]
+        if email.endswith('@shizuha.com'):
+            return email[:-len('@shizuha.com')]
+        return email.split('@', 1)[0]
+
+    assignee = _canonical_agent_email(item.assignee_email)
+    for member in sorted(_plat999_named_cosigner_emails()):
+        if _canonical_agent_email(member) == assignee:
+            continue
+        h = health.get(short(member)) or {}
+        # No fail-open: a member absent from the health map (scrape failure)
+        # is NOT a failover candidate — rerouting to a nominally-active
+        # co-signer on stale health defeats "stays on assignee".
+        if h.get('status') != 'active':
+            continue
+        try:
+            row = user_service.get_user_by_email(member)
+        except Exception:
+            row = None
+        uid = int(row.get('id')) if row and str(row.get('id', '')).isdigit() else None
+        # Canonical address invariant (PLS-494): stored agent emails are the
+        # canonical @shizuha.com form; @agents.shizuha.io is a marker-lane
+        # alias only. The handoff stores this value, so the target must fold
+        # before Item.save authorizes the assignee against the roster.
+        return uid, _canonical_agent_email(member)
+    return None, None
+
+
+PLAT999_COSIGNER_WAKE_REDIS_KEY = 'pulse:plat999_cosigner_wake'
+PLAT999_COSIGNER_WAKE_TTL_S = 3600
+
+
+def _clear_plat999_cosigner_wake():
+    """Best-effort delete of the co-signer wake attestation.
+
+    Called when a within-set failover legitimately moves the card: the
+    identity it attests to no longer owns a ready identity-bound card, so a
+    stale marker must not seat a hibernated co-signer for work she no longer
+    holds. A later sweep re-mints if the case recurs.
+    """
+    try:
+        from .services.workflow_service import WorkflowService
+        WorkflowService._redis_client().delete(PLAT999_COSIGNER_WAKE_REDIS_KEY)
+    except Exception:
+        logger.warning('plat999 co-signer wake clear failed', exc_info=True)
+
 
 def _canonical_agent_email(email):
     # PLS-494: single shared canonicalization (see tasks/agent_liveness.py) so the
@@ -5627,16 +5711,82 @@ def sweep_stale_offline_assignments(self, hours: int | None = None):
         # on a hibernated seat for a day because its linked PR exempted it
         # from the in-flight failover). Normal-priority items keep the
         # comment-only behavior.
+        # PLAT-11803 exception: identity-bound cards (label `plat-999`
+        # co-sign, or a generic `identity-bound` marker) must NOT auto-failover
+        # to a different identity — the co-signer set is the authority, so a
+        # rerouted card lands on a seat that can never green the gate
+        # (PLAT-11771: sora → hiro 4 minutes after creation). Keep the
+        # assignee and raise a wake signal instead; failover only within the
+        # named co-signer set.
+        from .label_utils import canonical_label_set
+        _labels = canonical_label_set(item.labels)
+        is_identity_bound = 'plat-999' in _labels or 'identity-bound' in _labels
         if (item.priority or '').strip().lower() in ('urgent', 'high'):
             try:
                 from .services.workflow_service import WorkflowService as _WS
-                uid, email = _WS._resolve_team_assignee(
-                    item.assignment_group,
-                    exclude_email=item.assignee_email,
-                    item=item,
-                    project_key=(item.project.key if item.project_id else None),
-                    enforce_cap=False,
-                )
+                if is_identity_bound:
+                    # PLAT-11803: failover only within the named co-signer set
+                    # (sora ↔ aoi). Cross-identity rerouting is forbidden — the
+                    # card stays on its co-signer and a wake signal is raised
+                    # instead when no set member is active.
+                    uid, email = _resolve_plat999_cosigner_failover_target(item, health)
+                    if not email:
+                        old = item.assignee_email
+                        from .services.mechanical_comments import (
+                            MechanicalCommentFactory,
+                            deterministic_event_id,
+                        )
+                        MechanicalCommentFactory.create(
+                            item=item,
+                            origin_kind=Comment.ORIGIN_WORKFLOW_LIFECYCLE,
+                            origin_event='assignment.identity_bound_wake',
+                            template_version=1,
+                            structured_payload={
+                                'priority': (item.priority or '').strip(),
+                                'prior_email': str(old),
+                            },
+                            origin_event_id=deterministic_event_id(
+                                'assignment.identity_bound_wake', item, old, effective_hours,
+                            ),
+                        )
+                        meta = item.metadata or {}
+                        if meta.get('identity_bound_wake_requested') != old:
+                            meta['identity_bound_wake_requested'] = old
+                            meta['identity_bound_wake_requested_at'] = timezone.now().isoformat()
+                            item.metadata = meta
+                            item.save(update_fields=['metadata', 'updated_at'])
+                        # Mint the wake/lease attestation for real (PLAT-11803
+                        # review 6710 secondary (a)): the Hive GLM lease planner
+                        # cannot see task labels, so this Redis marker is the
+                        # typed Pulse-side attestation that a READY identity-bound
+                        # card is owned by exactly this identity. Hive gates its
+                        # identity_bound_priority seatel on this payload.
+                        import json as _json
+                        try:
+                            _WS._redis_client().setex(
+                                PLAT999_COSIGNER_WAKE_REDIS_KEY,
+                                PLAT999_COSIGNER_WAKE_TTL_S,
+                                _json.dumps({
+                                    'assignee_email': item.assignee_email,
+                                    'item_key': getattr(item, 'item_key', str(item.pk)),
+                                    'requested_at': timezone.now().isoformat(),
+                                }),
+                            )
+                        except Exception:
+                            logger.warning(
+                                'plat999 co-signer wake publish failed for %s',
+                                getattr(item, 'item_key', item.pk), exc_info=True)
+                        logger.warning(
+                            'sweep_stale_offline_assignments: %s identity-bound wake requested for %s',
+                            getattr(item, 'item_key', item.pk), old)
+                else:
+                    uid, email = _WS._resolve_team_assignee(
+                        item.assignment_group,
+                        exclude_email=item.assignee_email,
+                        item=item,
+                        project_key=(item.project.key if item.project_id else None),
+                        enforce_cap=False,
+                    )
                 if email:
                     old = item.assignee_email
                     item.assignee_id = uid
@@ -5656,6 +5806,10 @@ def sweep_stale_offline_assignments(self, hours: int | None = None):
                     logger.warning(
                         'sweep_stale_offline_assignments: %s failed over %s -> %s',
                         getattr(item, 'item_key', item.pk), old, email)
+                    if is_identity_bound:
+                        # Within-set failover: the identity the wake marker
+                        # attests to no longer owns the ready card — clear it.
+                        _clear_plat999_cosigner_wake()
             except Exception:
                 logger.exception('sweep_stale_offline_assignments: failover failed for %s',
                                  getattr(item, 'item_key', item.pk))

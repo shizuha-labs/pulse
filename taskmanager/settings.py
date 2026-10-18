@@ -541,6 +541,16 @@ CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in os.environ.get(
 # Notification behavior settings
 AUTO_SEND_REMINDER = os.environ.get('AUTO_SEND_REMINDER', 'true').lower() == 'true'
 
+# PLAT-11803: PLAT-999 Path A named co-signer set — the identity-bound
+# authority for cortex/privileged merges. Identity-bound cards (label
+# `plat-999` co-sign or `identity-bound`) must NOT auto-failover to a
+# different identity: only a set identity can green
+# `privileged-merge-gate / validate`, so failover is restricted to this set
+# (sora ↔ aoi) and a wake signal is raised instead when no member is active.
+PLAT_999_NAMED_COSIGNERS = [origin.strip().lower() for origin in os.environ.get(
+    'PLAT_999_NAMED_COSIGNERS', 'sora@agents.shizuha.io,aoi@agents.shizuha.io'
+).split(',') if origin.strip()]
+
 # Server Port Settings
 SERVER_PORT = os.environ.get('SERVER_PORT', '8002')
 
