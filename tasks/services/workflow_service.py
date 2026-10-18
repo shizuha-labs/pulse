@@ -10573,8 +10573,9 @@ class WorkflowService:
 
 
             elif v_type == 'reviewer_pass_requires_disposition':
+                snapshot = WorkflowService._refresh_reviewer_request_snapshot(item)
                 ok, detail = WorkflowService._reviewer_pass_dispositions_open_requests(
-                    item, screen_data,
+                    item, screen_data, snapshot=snapshot, require_fresh=True,
                 )
                 if not ok:
                     raise WorkflowValidationError(
@@ -11382,7 +11383,112 @@ class WorkflowService:
 
 
     @staticmethod
-    def _reviewer_pass_dispositions_open_requests(item, screen_data=None):
+    def _refresh_reviewer_request_snapshot(item):
+        """Produce complete, uncached exact-head Origin review authority.
+
+        Only this invocation's successful snapshot can establish known-empty.
+        Stored metadata is an audit record, not authority to reuse a prior read.
+        Any provider, pagination, parsing or head race leaves authority unknown.
+        """
+        meta = getattr(item, 'metadata', None) or {}
+        bounced = meta.get('review_bounce_pr_heads') or {}
+        if not isinstance(bounced, dict) or not bounced:
+            return None
+        linked = {str(p.get('url') or '').rstrip('/'): p
+                  for p in meta.get('pull_requests') or [] if isinstance(p, dict)}
+        targets = {}
+        for url, bounce in bounced.items():
+            if url == 'no-pr':
+                continue
+            entry = linked.get(str(url).rstrip('/')) or {}
+            head = WorkflowService._normalize_scm_sha(entry.get('head_sha'))
+            if (not isinstance(entry.get('head_sha'), str)
+                    or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', head)
+                    or not isinstance(bounce, str) or not bounce.strip()):
+                return None
+            if head == WorkflowService._normalize_scm_sha(bounce):
+                targets[str(url).rstrip('/')] = head
+        if not targets:
+            return None
+        token = next((os.environ.get(k) for k in (
+            'FORGEJO_TOKEN', 'ORIGIN_TOKEN', 'GITEA_TOKEN', 'TEA_TOKEN')
+            if os.environ.get(k)), '')
+        origin = next((str(os.environ.get(k)).strip().rstrip('/')
+                       for k in ('ORIGIN_URL', 'FORGEJO_URL')
+                       if str(os.environ.get(k) or '').strip()), '')
+        if not token or not origin:
+            return None
+        headers = {'Authorization': f'token {token}', 'Accept': 'application/json'}
+        ids = []
+        try:
+            import requests as _requests
+
+            def read(url, **kwargs):
+                result = _requests.get(
+                    url, headers=headers, timeout=5, allow_redirects=False, **kwargs)
+                if result.status_code != 200:
+                    raise ValueError('review authority requires direct HTTP 200')
+                return result.json()
+
+            for url, head in targets.items():
+                coords = parse_origin_pr_reference(url)
+                if not coords:
+                    raise ValueError('unsupported review provider')
+                owner, repo, number = coords
+                base = f'{origin}/api/v1/repos/{owner}/{repo}/pulls/{number}'
+
+                def read_head():
+                    data = read(base)
+                    if not isinstance(data, dict) or not isinstance(data.get('head'), dict):
+                        raise ValueError('missing provider head')
+                    if WorkflowService._normalize_scm_sha(data['head'].get('sha')) != head:
+                        raise ValueError('review head changed')
+
+                read_head()
+                seen = set()
+                for page in range(1, 11):
+                    rows = read(base + '/reviews', params={'limit': 100, 'page': page})
+                    if not isinstance(rows, list) or len(rows) > 100:
+                        raise ValueError('incomplete review page')
+                    for row in rows:
+                        if not isinstance(row, dict):
+                            raise ValueError('malformed review')
+                        review_id = row.get('id')
+                        state = str(row.get('state') or row.get('type') or '').strip().upper()
+                        commit = WorkflowService._forgejo_review_commit_id(row)
+                        raw_commit = row.get('commit_id') or row.get('commitID')
+                        dismissed = row.get('dismissed', False)
+                        if (type(review_id) is not int or review_id <= 0 or review_id in seen
+                                or not isinstance(raw_commit, str)
+                                or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', commit)
+                                or type(dismissed) is not bool
+                                or state not in WorkflowService._FORGEJO_REVIEW_STATES
+                                | {'PENDING', 'DISMISSED'}):
+                            raise ValueError('ambiguous review authority')
+                        seen.add(review_id)
+                        if (commit == head and not dismissed
+                                and state in {'REQUEST_CHANGES', 'CHANGES_REQUESTED'}):
+                            ids.append(f'{url}#review-{review_id}')
+                    # Do not infer completeness from a short page: the server
+                    # may clamp limit below 100. Require the terminal empty page.
+                    if not rows:
+                        break
+                else:
+                    raise ValueError('review pagination incomplete')
+                read_head()
+        except Exception as exc:
+            # Never log provider payloads, tokens or free-form response text.
+            logger.warning('Reviewer disposition snapshot unavailable: %s', type(exc).__name__)
+            return None
+        snapshot = {'heads': targets, 'ids': sorted(ids)}
+        item.metadata = {**meta, 'open_change_request_ids': snapshot['ids'],
+                         'review_disposition_snapshot': {
+                             **snapshot, 'checked_at': timezone.now().isoformat()}}
+        item.save(update_fields=['metadata'])
+        return snapshot
+
+    @staticmethod
+    def _reviewer_pass_dispositions_open_requests(item, screen_data=None, *, snapshot=None, require_fresh=False):
         """PLAT-10330: reviewer approve on an unchanged bounce head must disposition.
 
         Symmetry with the author rebuttal gate. A pass on a head that moved is
@@ -11416,7 +11522,13 @@ class WorkflowService:
         if not unchanged:
             return True, ''
         ids = meta.get('open_change_request_ids')
-        if not isinstance(ids, list) or not [i for i in ids if str(i).strip()]:
+        fresh = (isinstance(snapshot, dict)
+                 and snapshot.get('heads') == {str(url).rstrip('/'): current[str(url).rstrip('/')]
+                                              for url in unchanged}
+                 and snapshot.get('ids') == ids)
+        if ((require_fresh and not fresh) or not isinstance(ids, list)
+                or (not [i for i in ids if str(i).strip()]
+                    and not (fresh and ids == []))):
             return False, 'open change-request ids are missing or unparseable'
         screen_data = screen_data if isinstance(screen_data, dict) else {}
         body = str(screen_data.get('comment') or screen_data.get('verdict') or '')
