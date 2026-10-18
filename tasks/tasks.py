@@ -12078,6 +12078,45 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
         if scoped_aliases:
             _reconcile_qs = _reconcile_qs.filter(assignee_email__in=scoped_aliases)
 
+        def _assignment_actor_is_person(item) -> bool:
+            """PLAT-11229: True when the item's most recent ``assigned`` activity
+            boundary was recorded against a named (non-system) actor — i.e. the
+            concrete owner was set directly by a person (department-internal
+            delegation, lead override, direct-handoff), not by a sweep/lease
+            path. Rebalance/failover/re-lease writes stamp
+            ``_activity_actor = (0, 'system@pulse')`` before ``save()``, so a
+            system actor on the last assignment boundary is the discriminator.
+            No recorded boundary (legacy row) → not a person override; keep the
+            pre-existing reconciliation behavior rather than guessing."""
+            from .models import ItemActivity
+            last = (
+                ItemActivity.objects
+                .filter(item_id=item.pk, action='assigned')
+                .order_by('-created_at')
+                .values_list('user_email', 'user_id')
+                .first()
+            )
+            if last is None:
+                return False
+            _actor_email, _actor_id = last
+            _actor_email = (_actor_email or '').strip().lower()
+            if not _actor_email or _actor_email == 'system@pulse':
+                return False
+            if _actor_email == 'scheduler@pulse.shizuha.com':
+                # Scheduler/recurrence machinery also stamps user_id 0 with a
+                # machine identity (recurring truth-park, scheduler logging) —
+                # system actor, keep legacy reconciliation behavior.
+                return False
+            # PLAT-11701 follow-up (reika review on PLAT-11229): the previous
+            # blanket ``user_id == 0 → not a person`` reject also dropped agent
+            # MCP assignments that stamp id 0 with a real agent email (the ID-
+            # service user is not resolvable from the writing seat). An id-0
+            # boundary carrying any other (real) email IS a person-made
+            # assignment — honor it. This is the 2026-10-04 incident class:
+            # PLAT-11217/11218 were direct-assigned mid-session and twice
+            # cleared back to `found`/unassigned by this reconciliation.
+            return True
+
         def _locked_roster_repair(_pk):
             """PLS-524 P1: run the eligibility revalidation AND the clear/replace
             write under ONE ``select_for_update`` lock, so the write fence and the
@@ -12104,6 +12143,32 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                 if WorkflowService._is_operator_target(_it.assignee_id, _email):
                     return 0
                 if _is_cos_pinned(_it) or _is_decision_pinned(_it):
+                    return 0
+                # PLAT-11229: an explicit person-made direct assignment (a
+                # concrete owner set by a named actor — e.g. a security lead's
+                # department-internal delegation during a WIP-cap hold) is an
+                # ownership decision the sweep must NOT silently revert even
+                # when the owner is not on the row's team roster. The 2026-10-04
+                # incident: PLAT-11217/11218 were direct-assigned mid-session and
+                # twice cleared back to `found`/unassigned by this reconciliation.
+                # Honor the override (metadata-stamped so the audit comment posts
+                # once, not per sweep tick); system-actor assignments (rebalance
+                # re-leases, capacity pulls, failover drains) keep the existing
+                # reconciliation behavior, and the separate ghost/down-owner
+                # drains still evacuate a departed or unavailable direct owner.
+                if _assignment_actor_is_person(_it):
+                    _meta = dict(_it.metadata or {})
+                    if not _meta.get('direct_override_honored_at'):
+                        _meta['direct_override_honored_at'] = timezone.now().isoformat()
+                        _it.metadata = _meta
+                        _it.save(update_fields=['metadata', 'updated_at'])
+                        _create_system_comment_deduped(
+                            _it,
+                            f'Honoring direct override: `{_email}` is not a member of the '
+                            f'**{_grp}** team, but the current concrete assignment was '
+                            'made directly by a person — the rebalance sweep did not '
+                            'revert same-session direct ownership (PLAT-11229).',
+                        )
                     return 0
                 _effective_status = WorkflowService._effective_status_lane_status(_it)
                 _explicit_merge_handoff = (
