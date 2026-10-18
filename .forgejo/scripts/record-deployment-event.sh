@@ -115,6 +115,15 @@ values = [
 print(*values)
 ')
 EOF_DEPLOY
+  # PLS-1346: keep the deployment's own matchLabels around so the digest
+  # resolver below can select this rollout's pods without assuming a label
+  # convention (same producer-class fix as cortex, PLS-1243).
+  DEPLOY_SELECTOR="$(printf '%s' "$deployment_json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+labels = row.get("spec", {}).get("selector", {}).get("matchLabels", {}) or {}
+print(",".join(f"{k}={v}" for k, v in sorted(labels.items())))
+')"
   unset deployment_json
 fi
 
@@ -126,6 +135,39 @@ fi
     echo "::error::Deployment $NAMESPACE/$DEPLOYMENT_TARGET is not converged: desired=$DESIRED ready=$READY updated=$UPDATED available=$AVAILABLE generation=$GENERATION observed=$OBSERVED_GENERATION" >&2
     exit 1
   }
+
+# PLS-1346 (regression of PLS-1279 on the pulse repo): resolve the immutable
+# image digest for the converged rollout from the live pods' status.imageID
+# (the registry-resolved sha256 the kubelet pulled), and split image_tag out
+# of the repo:tag IMAGE string. Same producer-class fix as cortex
+# (PLS-1243/PLS-1277/PLS-1278): any resolution failure degrades to an empty
+# digest — fabricating identity claims is worse than omitting. The resolver
+# runs only on the live path; DRY_RUN short-circuits before it.
+export COMPONENT IMAGE
+IMAGE_DIGEST=""
+# Tag split does not need a live selector or a cluster. A known IMAGE with
+# an empty selector must still record image_tag (reika 6649).
+IMAGE_TAG="$(printf '%s' "$IMAGE" | sed 's/.*://')"
+if [ "$DRY_RUN" != "1" ] && [ -n "${DEPLOY_SELECTOR:-}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+  IMAGE_DIGEST="$(kubectl -n "$NAMESPACE" get pods -l "$DEPLOY_SELECTOR" -o json 2>/dev/null | COMPONENT="$COMPONENT" IMAGE="$IMAGE" python3 "$SCRIPT_DIR/select_pod_image_digest.py" 2>/dev/null || true)"
+  # Anchored regex (cortex review 4528): exactly 64 lowercase hex chars
+  # after the sha256: prefix — POSIX case-globs would reject valid digests.
+  if printf '%s' "$IMAGE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+    :
+  else
+    IMAGE_DIGEST=""
+  fi
+  if [ -n "$IMAGE_DIGEST" ]; then
+    echo "resolved image digest: ${IMAGE_DIGEST}"
+  else
+    echo "::warning::image digest unresolved for $NAMESPACE/$DEPLOYMENT_TARGET; recording event without image_digest (PLS-1346)" >&2
+  fi
+fi
+# An explicitly-provided digest (workflow-resolved) wins over the in-script
+# resolution; only fill the gap otherwise.
+[ -n "${DEPLOYMENT_EVENT_IMAGE_DIGEST:-}" ] || export DEPLOYMENT_EVENT_IMAGE_DIGEST="$IMAGE_DIGEST"
+[ -n "${DEPLOYMENT_EVENT_IMAGE_TAG:-}" ] || export DEPLOYMENT_EVENT_IMAGE_TAG="$IMAGE_TAG"
 
 if [ "$DRY_RUN" != "1" ]; then
   # PLAT-7957 (third consumer, sara's triage): the live `pulse-api-token`
@@ -209,6 +251,13 @@ payload = {
         "observed_generation": int(os.environ["OBSERVED_GENERATION"]),
     },
 }
+# PLS-1346: persist the registry-resolved digest (+ tag) so the deploy-verify
+# gate can correlate production evidence without agent-side registry access
+# (same contract as cortex, PLS-1243). Omitted entirely when unresolved.
+if os.environ.get("DEPLOYMENT_EVENT_IMAGE_DIGEST", "").strip():
+    payload["image_digest"] = os.environ["DEPLOYMENT_EVENT_IMAGE_DIGEST"].strip()
+if os.environ.get("DEPLOYMENT_EVENT_IMAGE_TAG", "").strip():
+    payload["image_tag"] = os.environ["DEPLOYMENT_EVENT_IMAGE_TAG"].strip()
 print(json.dumps(payload, separators=(",", ":")))
 PY
 )"
