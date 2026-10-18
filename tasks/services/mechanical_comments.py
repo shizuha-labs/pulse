@@ -238,6 +238,18 @@ def _focused_qa_fail_committed(p):
 
 _SPECS = (
     MechanicalTemplate(
+        Comment.ORIGIN_WORKFLOW_LIFECYCLE, 'assignment.identity_bound_wake', 1,
+        {'priority': str, 'prior_email': str}, {},
+        lambda p: (
+            f"[identity-bound wake requested] {p['priority']} card stays on "
+            f"{p['prior_email'].split('@')[0]}: this identity-bound task must not "
+            "auto-failover to a non-co-signer (gate cannot green from a "
+            "different identity) and no other named co-signer is active. "
+            "Wake/lease signal raised — co-signer needs a slot to post "
+            "APPROVED/REQUEST_CHANGES."
+        ),
+    ),
+    MechanicalTemplate(
         Comment.ORIGIN_WORKFLOW_LIFECYCLE, 'link.auto_block', 1,
         {'blocker_key': str}, {},
         lambda p: (
