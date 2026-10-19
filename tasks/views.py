@@ -18445,6 +18445,11 @@ def pulse_metrics(request):
     # lost, which the failover drain would otherwise treat as hard-off).
     from .agent_liveness import render_agent_liveness_metrics
     body = body.rstrip('\n') + '\n' + render_agent_liveness_metrics()
+    # PLAT-11804: per-principal runtime estate gauge — the converged
+    # discriminator surface (ok / down / backoff) so a frozen stop is
+    # classifiable instead of prose-only.
+    from .runtime_estate_metrics import render_agent_runtime_estate_metrics
+    body = body.rstrip('\n') + '\n' + render_agent_runtime_estate_metrics()
     # PLS-728: project-membership projection serve outcomes — the family is
     # always rendered (zero-filled) so a detector can alert on absent() as well
     # as on `unavailable` increments.
