@@ -5017,11 +5017,17 @@ def setup_notification_schedules():
         # exporter, no broad secret injection); the task self-guards with a Redis
         # SET NX EX singleton lock + a hard bounded timeout. `enabled` follows the
         # ATTACHMENT_CANARY_ENABLED gate the task also self-checks.
+        # PLS-1412: one_off must be forced off. django-celery-beat disables a
+        # one_off row after the first dispatch and clears last_run_at, which
+        # re-seeds the due baseline and starves the 5-minute canary until the
+        # next process boot. ensure_periodic_task only writes one_off when it
+        # is passed, so a stale True survived the PLS-794 no-op save.
         ensure_periodic_task(
             name='Attachment Storage Canary',
             interval=interval_5min,
             task='tasks.attachment_storage_canary',
             enabled=bool(getattr(settings, 'ATTACHMENT_CANARY_ENABLED', True)),
+            one_off=False,
         )
 
         # PLS-915: durable net for the PulseRecurringMissingTimer invariant —

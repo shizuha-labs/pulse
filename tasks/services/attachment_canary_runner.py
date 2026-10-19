@@ -251,6 +251,82 @@ def _get_redis():
         return None
 
 
+
+def _lock_ttl_seconds(budget: float) -> int:
+    """How long a live probe may hold the singleton lock.
+
+    Must outlive the join budget (so a timed-out thread is still covered) and
+    stay far under the 300s beat interval (so one stuck holder cannot eat
+    multiple schedules).
+    """
+    return max(int(budget) + 15, 1)
+
+
+def _lock_token(now: float) -> str:
+    # Unix seconds, not a pid. Pid-sized values must not parse as acquire times.
+    return f"{now:.3f}"
+
+
+def _parse_lock_acquired(raw) -> Optional[float]:
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if value < 1_000_000_000:
+        return None
+    return value
+
+
+def _lock_pttl_ms(client) -> Optional[int]:
+    pttl = getattr(client, "pttl", None)
+    if not callable(pttl):
+        return None
+    try:
+        return int(pttl(_LOCK_KEY))
+    except Exception:  # noqa: BLE001 — unknown TTL; caller must not guess
+        return None
+
+
+def _lock_is_stale(client, now: float, max_age: float) -> bool:
+    """True when the held lock can no longer be a live in-budget probe."""
+    try:
+        raw = client.get(_LOCK_KEY)
+    except Exception:  # noqa: BLE001
+        return False
+    if raw is None:
+        return False
+    acquired = _parse_lock_acquired(raw)
+    if acquired is not None:
+        return (now - acquired) > max_age
+    # Legacy pid value: only an immortal key (PTTL < 0) is safe to steal.
+    # A positive TTL still belongs to a live pre-PLS-1412 holder.
+    pttl = _lock_pttl_ms(client)
+    return pttl is not None and pttl < 0
+
+
+def _acquire_run_lock(client, budget: float) -> bool:
+    """SET NX the singleton lock, stealing a stale holder once.
+
+    Raises on the initial SET so the tick can fail closed as
+    redis_unavailable. A stale-steal error is treated as "still locked"
+    rather than running unlocked.
+    """
+    ttl = _lock_ttl_seconds(budget)
+    now = time.time()
+    if client.set(_LOCK_KEY, _lock_token(now), nx=True, ex=ttl):
+        return True
+    if not _lock_is_stale(client, now, ttl):
+        return False
+    try:
+        client.delete(_LOCK_KEY)
+        return bool(client.set(
+            _LOCK_KEY, _lock_token(time.time()), nx=True, ex=ttl))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @shared_task(bind=True, max_retries=0, name="tasks.attachment_storage_canary")
 def attachment_storage_canary_tick(self):  # noqa: ARG001 — celery bind
     """Periodic in-boundary canary tick. Singleton + non-re-entrant + bounded."""
@@ -270,8 +346,11 @@ def attachment_storage_canary_tick(self):  # noqa: ARG001 — celery bind
         # TTL a touch beyond the run budget so an overrunning run keeps the lock
         # (no overlap) but a crashed run auto-releases. With the bounded canary
         # HTTP client the actual op aborts within a few seconds, inside this TTL.
-        lock_acquired = bool(redis_client.set(
-            _LOCK_KEY, str(os.getpid()), nx=True, ex=int(budget) + 15))
+        # PLS-1412: a lock with no expiry, or one whose acquire-time is already
+        # older than that TTL, is stale. Leaving it in place skips every later
+        # tick without writing last_run, so success=1 stays stuck for many
+        # 300s intervals (schedule starvation) even though beat is healthy.
+        lock_acquired = _acquire_run_lock(redis_client, budget)
     except Exception:  # noqa: BLE001 — no verifiable singleton ownership on a
         # Redis error; fail closed rather than run unlocked.
         return {"skipped": "redis_unavailable"}
