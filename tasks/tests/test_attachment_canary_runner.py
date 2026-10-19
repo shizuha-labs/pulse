@@ -37,6 +37,11 @@ class _FakeRedis:
     def delete(self, key):
         self.store.pop(key, None)
 
+    def pttl(self, key):
+        if key not in self.store:
+            return -2
+        return getattr(self, "pttl_value", -1)
+
 
 class _StateFileMixin:
     def setUp(self):
@@ -221,6 +226,43 @@ class TimeoutLeaseTests(_StateFileMixin, SimpleTestCase):
             runner.attachment_storage_canary_tick()
         self.assertNotIn(runner._LOCK_KEY, shared.store,
                          "a clean run must release the lock for the next tick")
+
+
+class StaleLockScheduleTests(_StateFileMixin, SimpleTestCase):
+    """PLS-1412: a stuck singleton lock must not freeze last_run for many
+    300s beat intervals while the last completed probe still reads success=1.
+    """
+
+    def test_immortal_legacy_lock_is_stolen_and_records_run(self):
+        self._redis.store[runner._LOCK_KEY] = "4242"  # pre-timestamp pid, no TTL
+        self._redis.pttl_value = -1
+        prior = runner._redis_read_state() or {}
+        before = float(prior.get("last_run") or 0.0)
+        with patch.object(runner, "run_attachment_storage_canary",
+                          return_value={"ok": True, "phases": {},
+                                        "stale_objects_removed": 0}):
+            result = runner.attachment_storage_canary_tick()
+        self.assertTrue(result["ok"])
+        state = runner._redis_read_state()
+        self.assertEqual(state["success"], 1)
+        self.assertGreater(state["last_run"], before)
+        # clean success releases the lock it stole
+        self.assertNotIn(runner._LOCK_KEY, self._redis.store)
+
+    def test_fresh_lock_is_not_stolen(self):
+        self._redis.store[runner._LOCK_KEY] = runner._lock_token(time.time())
+        result = runner.attachment_storage_canary_tick()
+        self.assertEqual(result, {"skipped": "locked"})
+
+    def test_aged_timestamp_lock_is_stolen_even_with_long_ttl(self):
+        self._redis.store[runner._LOCK_KEY] = runner._lock_token(time.time() - 600)
+        self._redis.pttl_value = 3_600_000  # mis-set hour-long TTL must not win
+        with patch.object(runner, "run_attachment_storage_canary",
+                          return_value={"ok": True, "phases": {},
+                                        "stale_objects_removed": 0}):
+            result = runner.attachment_storage_canary_tick()
+        self.assertTrue(result["ok"])
+        self.assertGreater(runner._redis_read_state()["last_run"], 0)
 
 
 class DisabledOmitsMetricTests(_StateFileMixin, SimpleTestCase):

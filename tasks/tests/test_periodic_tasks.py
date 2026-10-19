@@ -350,6 +350,31 @@ class PeriodicTaskScheduleTests(TestCase):
         canary.refresh_from_db()
         self.assertTrue(canary.enabled)
 
+    def test_canary_setup_clears_stale_one_off(self):
+        """PLS-1412: a stale one_off=True disables the canary after one dispatch.
+
+        django-celery-beat's ModelEntry.is_due turns one_off off after
+        total_run_count>0 and nulls last_run_at, which re-seeds the due
+        baseline. Setup must clear that flag or the 5-minute schedule starves
+        until the next process boot happens to re-enable it.
+        """
+        PeriodicTask.objects.all().delete()
+        setup_notification_schedules()
+        canary = PeriodicTask.objects.get(name="Attachment Storage Canary")
+        canary.one_off = True
+        canary.enabled = False
+        canary.last_run_at = None
+        canary.total_run_count = 0
+        canary.save(update_fields=["one_off", "enabled", "last_run_at", "total_run_count"])
+
+        setup_notification_schedules()
+
+        canary.refresh_from_db()
+        self.assertFalse(canary.one_off)
+        self.assertTrue(canary.enabled)
+        self.assertEqual(canary.interval.every, 5)
+        self.assertEqual(canary.interval.period, "minutes")
+
     def test_linked_pr_disable_does_not_needlessly_bump_date_changed(self):
         """PLS-794: preserve_disabled path must also skip no-op saves."""
         PeriodicTask.objects.all().delete()
