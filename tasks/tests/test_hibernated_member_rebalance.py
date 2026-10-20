@@ -161,7 +161,7 @@ class HibernatedBlankGroupDrainTests(TestCase):
              ), \
              patch('tasks.tasks._agent_unavailability_reason', return_value='hibernated'), \
              patch('tasks.tasks._agent_has_recent_pulse_heartbeat', return_value=True):
-            return sweep_rebalance_pods.run()
+            return sweep_rebalance_pods.apply(args=[], kwargs={}).get()
 
     def test_blank_group_todo_drains_to_idle_teammate_and_stamps_group(self):
         hibernated, idle, users, project, org_id, base = _admin_ops_fixture()

@@ -5344,6 +5344,18 @@ class WorkflowService:
         )
 
     @staticmethod
+    def _is_qa_roster_evidence(item):
+        """PLS-1394: reviewed-task evidence QA, not a code review."""
+        if item is None:
+            return False
+        meta = item.metadata if isinstance(getattr(item, 'metadata', None), dict) else {}
+        mode = str(meta.get('routing_mode') or meta.get('focused_qa_routing_mode') or '')
+        if mode != 'qa-roster':
+            return False
+        prs = meta.get('pull_requests') or meta.get('linked_pr') or []
+        return not prs
+
+    @staticmethod
     def _is_no_pr_verification_class(item):
         """True for no-deploy verification classes (PLS-1218).
 
@@ -13959,6 +13971,21 @@ class WorkflowService:
                     # pr_linked_or_flagged validator that HIVE-9 bypassed. The reason-bearing
                     # breadcrumb lets the architect bounce a merely-forgot-to-link-PR code
                     # task back to eng rather than mistake it for design work.
+                    # PLS-1394: a reviewed-task with routing_mode qa-roster and no
+                    # linked code PR is evidence QA, not a code review. Keep the
+                    # QA roster and exclude the verification author. If no other
+                    # QA seat is free, architecture owns the evidence disposition.
+                    if (
+                        team_name == 'review'
+                        and WorkflowService._is_qa_roster_evidence(item)
+                    ):
+                        team_name = 'qa'
+                        item.metadata = {
+                            **(item.metadata or {}),
+                            'routing_mode': 'qa-roster',
+                            'pls1394_evidence_route': 'qa',
+                        }
+                        update_fields.append('metadata')
                     if team_name == 'review' and not WorkflowService._is_reviewable(item):
                         from ..models import Comment
                         Comment.objects.create(
@@ -14057,6 +14084,11 @@ class WorkflowService:
                                             _firing_excluded = {_firing_email}
                                 except Exception:
                                     pass
+                        if WorkflowService._is_qa_roster_evidence(item):
+                            author = str(getattr(item, 'assignee_email', '') or '').strip().lower()
+                            if author:
+                                _firing_excluded = set(_firing_excluded or set())
+                                _firing_excluded.add(author)
                         uid, email = WorkflowService._resolve_team_assignee(
                             team_name, exclude_email=item.created_by_email,
                             hard_exclude_emails=_firing_excluded,
@@ -14065,6 +14097,33 @@ class WorkflowService:
                             item=item,
                             assignment_group_override=team_name,
                         )
+                        if (
+                            WorkflowService._is_qa_roster_evidence(item)
+                            and team_name == 'qa'
+                            and (
+                                not email
+                                or str(email).strip().lower() == str(
+                                    getattr(item, 'assignee_email', '') or ''
+                                ).strip().lower()
+                            )
+                        ):
+                            team_name = 'architecture'
+                            item.assignment_group = team_name
+                            item.metadata = {
+                                **(item.metadata or {}),
+                                'routing_mode': 'qa-roster',
+                                'pls1394_evidence_route': 'architecture',
+                            }
+                            update_fields.append('metadata')
+                            uid, email = WorkflowService._resolve_team_assignee(
+                                team_name,
+                                exclude_email=item.created_by_email,
+                                hard_exclude_emails=_firing_excluded,
+                                project_key=WorkflowService._item_project_key(item),
+                                allow_operator=_operator_capable,
+                                item=item,
+                                assignment_group_override=team_name,
+                            )
                         # PLS-16: funnel BOTH the resolved assignee and the legacy lead
                         # fallback through the operator-routing WRITE chokepoint. A path
                         # that resolves to the operator (human-ops team lead, a governance
