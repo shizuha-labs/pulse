@@ -908,6 +908,15 @@ jobs:
                 echo "deploy repo already desires ${IMAGE_TAG}"
                 return 0
               fi
+              # PLAT-10891: do not publish a desired tag the registry cannot serve.
+              # One bounded GET, no poll. Missing or single-arch manifests fail closed.
+              MANIFEST_URL="http://${REG}/v2/shizuha-pulse/manifests/${IMAGE_TAG}"
+              MANIFEST_ACCEPT="application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json"
+              if ! curl -fsS --max-time 20 -H "Accept: ${MANIFEST_ACCEPT}" -o /tmp/pulse-manifest.json "${MANIFEST_URL}"; then
+                echo "::error::registry manifest missing for ${IMAGE_TAG}; refusing to bump desired tag"
+                return 1
+              fi
+              python3 .forgejo/scripts/require_multiarch_manifest.py /tmp/pulse-manifest.json
               python3 .forgejo/scripts/deploy-values-path.py set /tmp/values.yaml image.tag "${IMAGE_TAG}" >/dev/null
               NEW_B64="$(base64 -w0 /tmp/values.yaml)"
               # PLAT-10373: fleet deploy admission (PLAT-4862, fail closed) requires a
