@@ -749,3 +749,106 @@ class PLAT4732SubstrateEnforcementTests(TestCase):
         # Legacy team-baseline satisfies kubeconfig → no capability reason at all.
         self.assertNotIn('seat_incapable_substrate', verdict.reasons)
         self.assertNotIn('seat_incapable', verdict.reasons)
+
+
+class PLS459EvidenceUrlCapabilityTests(TestCase):
+    """PLS-459: an Origin evidence URL must never imply `kubeconfig`.
+
+    The reported regression: `_task_required_capabilities()` substring-matched the
+    bare token `cluster`, and every security-ci finding embeds an Origin run URL
+    containing `.svc.cluster.local`. Seven findings (PLAT-4257/4259/4260/4261 and
+    PLAT-4313/4314/4315) were therefore routed as Kubernetes work and stranded,
+    because no Security seat holds `kubeconfig`.
+
+    ADR-0016 v7 fixed the inference, but no test pinned the *reported shape* — the
+    existing coverage asserts the principle with descriptive prose, and
+    `.svc.cluster.local` appears nowhere in this module. These fixtures close that
+    gap so the evidence-URL path cannot silently regress (it already recurred once
+    as PLAT-4612).
+    """
+
+    # The exact evidence line these findings carry.
+    ORIGIN_RUN_URL = (
+        'http://forgejo-http.origin.svc.cluster.local/shizuha-labs/'
+        'shizuha-tasks/actions/runs/3680'
+    )
+
+    def _finding(self, title, description, **kw):
+        data = dict(
+            labels=kw.pop('labels', ['security-ci']),
+            tags=kw.pop('tags', 'security-sensitive'),
+            assignment_group=kw.pop('assignment_group', 'security'),
+            title=title,
+            description=description,
+        )
+        data.update(kw)
+        return SimpleNamespace(**data)
+
+    def test_origin_evidence_url_does_not_require_kubeconfig(self):
+        """The literal PLS-459 shape: a run URL is evidence, not an instruction."""
+        item = self._finding(
+            'Semgrep: hardcoded credential in tasks/services/mailer.py',
+            f'Detected by security-ci.\n\nRun: {self.ORIGIN_RUN_URL}\n'
+            'Triage the finding and dispose it in the ledger.',
+        )
+        self.assertEqual(WorkflowService._task_required_capabilities(item), set())
+
+    def test_seven_affected_security_finding_shapes_stay_unrouted(self):
+        """All seven stranded findings (2026-07-12) must infer no capability."""
+        shapes = (
+            ('PLAT-4257', 'Dependency advisory: urllib3 CVE triage'),
+            ('PLAT-4259', 'Semgrep: subprocess call with shell=True'),
+            ('PLAT-4260', 'Dependency advisory: requests CVE triage'),
+            ('PLAT-4261', 'Semgrep: insecure deserialization candidate'),
+            ('PLAT-4313', 'Trivy: base image advisory rollup'),
+            ('PLAT-4314', 'Post-merge verification of the advisory ledger'),
+            ('PLAT-4315', 'Dependency advisory: certifi bundle refresh'),
+        )
+        for key, title in shapes:
+            with self.subTest(finding=key):
+                item = self._finding(
+                    f'[{key}] {title}',
+                    f'security-ci finding for {key}.\n'
+                    f'Evidence: {self.ORIGIN_RUN_URL}\n'
+                    'Review the advisory and record the disposition.',
+                )
+                self.assertEqual(
+                    WorkflowService._task_required_capabilities(item), set(),
+                    f'{key} must not require kubeconfig from an evidence URL',
+                )
+
+    def test_schemeless_cluster_local_hostname_does_not_require_kubeconfig(self):
+        """Hardening: the same host without a URL scheme is still not an action.
+
+        The URL scrubber only strips `scheme://...`, so a bare hostname survives
+        into the prose. It must still infer nothing, because inference is
+        action-bearing rather than substring-based.
+        """
+        item = self._finding(
+            'security-ci log retrieval for the advisory ledger',
+            'Logs are served by ci-logs.origin.svc.cluster.local:8080 for this run. '
+            'Read the finding and dispose it.',
+        )
+        self.assertEqual(WorkflowService._task_required_capabilities(item), set())
+
+    def test_evidence_url_does_not_mask_an_explicit_needs_declaration(self):
+        """Positive control: `needs:*` stays authoritative alongside evidence."""
+        item = self._finding(
+            'Rotate the security-ci runner secret',
+            f'Evidence: {self.ORIGIN_RUN_URL}',
+            labels={'needs:kubeconfig': True},
+        )
+        self.assertEqual(
+            WorkflowService._task_required_capabilities(item), {'kubeconfig'})
+
+    def test_real_kubernetes_action_still_requires_kubeconfig(self):
+        """Positive control: a genuine action is still gated, evidence or not."""
+        item = self._finding(
+            'Roll the security-ci runner deployment',
+            f'Evidence: {self.ORIGIN_RUN_URL}\n'
+            'Run kubectl apply to update the runner deployment, then roll it out.',
+            assignment_group='devops',
+            labels=[],
+        )
+        self.assertEqual(
+            WorkflowService._task_required_capabilities(item), {'kubeconfig'})
