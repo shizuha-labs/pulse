@@ -63,7 +63,14 @@ jobs:
             # gx->s1 stall, PLAT-4692) runs forever and leaks its memory request
             # (three such pods found Running 10-15h). Reap the Job shortly after
             # the gate has given up; ttl only applies once the Job finishes.
-            activeDeadlineSeconds: 2100
+            # PLAT-12005 2026-10-20: the suite outgrew this envelope under
+            # connection-retry latency + CPU throttle (run 9403: container wall
+            # 1799s, k8s Job deadline fired with NO test failures — zero
+            # FAILED/AssertionError lines; the retries shown are the app's own
+            # PLS-472 lookups, not test assertions). Headroom must sit ABOVE
+            # the watcher's wait (line ~426) so the suite can finish, and so
+            # any timeout still dumps suite output before the pod is reaped.
+            activeDeadlineSeconds: 4200
             ttlSecondsAfterFinished: 3600
             template:
               spec:
@@ -423,7 +430,13 @@ jobs:
           # ttlSecondsAfterFinished reaped it, so the log dump hit NotFound and the actual
           # test failures were unrecoverable. Poll for Complete OR Failed instead, and dump
           # the suite output while the pod still exists.
-          DEADLINE=$(( $(date +%s) + 1800 ))
+          # PLAT-12005: 3600s (60min). Empirical bound from the PR lane:
+          # run 9407 (head 31e13e8d) hit the 2400s shell deadline at
+          # 04:53:01Z with the suite pod still executing normally — the
+          # suite needs >40min at TEST_JOBS=8. The Job's
+          # activeDeadlineSeconds (4200) stays ABOVE this wait so any
+          # timeout still dumps suite output before the pod is reaped.
+          DEADLINE=$(( $(date +%s) + 3600 ))
           while true; do
             COMPLETE="$(kubectl get job -n build "${JOB}" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || true)"
             FAILED="$(kubectl get job -n build "${JOB}" -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)"
@@ -442,7 +455,7 @@ jobs:
               exit 1
             fi
             if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
-              echo "::error::backend test gate timed out after 1800s"
+              echo "::error::backend test gate timed out after 3600s"
               POD="$(kubectl get pods -n build -l job-name="${JOB}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
               kubectl -n build describe pod "${POD}" 2>/dev/null | tail -80 || true
               kubectl -n build get pod "${POD}" -o jsonpath='{range .status.initContainerStatuses[*]}{.name}{" "}{.state}{" "}{.lastState}{"\n"}{end}' 2>/dev/null || true
