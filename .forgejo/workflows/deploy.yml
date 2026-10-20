@@ -793,6 +793,13 @@ jobs:
           install -m 0644 "${SRC_DIR}/.forgejo/scripts/exact-deployment-pods.py" .forgejo/scripts/exact-deployment-pods.py
           install -m 0644 "${SRC_DIR}/.forgejo/scripts/test_exact_deployment_pods.py" .forgejo/scripts/test_exact_deployment_pods.py
           install -m 0644 "${SRC_DIR}/.forgejo/scripts/extract_tracking_key.py" .forgejo/scripts/extract_tracking_key.py
+          # PLS-1320 class (run 9486, 2026-10-20): the PLAT-10891 multiarch
+          # manifest gate added require_multiarch_manifest.py to the deploy
+          # step but not to this materialize list — script tracked in the
+          # git tree, absent on disk in the deploy-lane job -> "No such file
+          # or directory" -> deploy job exit 2. Materialize it with the
+          # other promotion helpers.
+          install -m 0644 "${SRC_DIR}/.forgejo/scripts/require_multiarch_manifest.py" .forgejo/scripts/require_multiarch_manifest.py
           # PLS-1320: the DeploymentEvent recorder is called via the
           # workspace-relative path by the dispatched-Job emitter, but the
           # historically-empty checkout never has it on disk — materialize it
