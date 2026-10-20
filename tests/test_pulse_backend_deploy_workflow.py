@@ -111,6 +111,18 @@ def test_deploy_repo_backend_update_precedes_lifecycle_convergence_wait():
     assert update_idx < assert_idx < wait_idx
 
 
+def test_desired_tag_bump_checks_registry_manifest_before_put():
+    text = _workflow_text()
+    fn = text[text.index("update_deploy_values_backend_tag() {") : text.index("assert_deploy_values_backend_tag() {")]
+    get_idx = fn.index("/v2/shizuha-pulse/manifests/${IMAGE_TAG}")
+    put_idx = fn.index("forgejo_contents_curl --accept-codes '^(200|201|409)$' PUT")
+    assert get_idx < put_idx
+    assert "refusing to bump desired tag" in fn
+    assert "require_multiarch_manifest.py" in fn
+    script = open(".forgejo/scripts/require_multiarch_manifest.py", encoding="utf-8").read()
+    assert "linux/amd64" in script and "linux/arm64" in script
+
+
 def test_backend_values_update_is_fail_closed_not_warning_only():
     text = _workflow_text()
     update_idx = text.index('update_deploy_values_backend_tag "${TAG}"')
