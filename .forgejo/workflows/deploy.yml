@@ -93,7 +93,13 @@ jobs:
             # gx->s1 stall, PLAT-4692) runs forever and leaks its memory request
             # (three such pods found Running 10-15h). Reap the Job shortly after
             # the gate has given up; ttl only applies once the Job finishes.
-            activeDeadlineSeconds: 2100
+            # PLAT-12005 2026-10-20: the suite outgrew the 30-min shell deadline
+            # at TEST_JOBS=8 — runs 9285/9378/9386 were reaped mid-run (no
+            # failures= summary, gate timeout at exactly 1800s) while the pod
+            # was still legitimately executing. Budget: shell gate 3000s, Job
+            # reaped at 3300s (gate must give up BEFORE the Job is reaped so
+            # dump_gate_evidence still sees a live pod).
+            activeDeadlineSeconds: 3300
             ttlSecondsAfterFinished: 3600
             template:
               spec:
@@ -379,7 +385,12 @@ jobs:
           # ttlSecondsAfterFinished reaped it, so the log dump hit NotFound and the actual
           # test failures were unrecoverable. Poll for Complete OR Failed instead, and dump
           # the suite output while the pod still exists.
-          DEADLINE=$(( $(date +%s) + 1800 ))
+          # PLAT-12005: 3000s (50min). The suite outgrew the old 1800s budget at
+          # TEST_JOBS=8 — runs 9285/9378/9386 all hit `gate timed out after
+          # 1800s` with no failures= summary while the suite pod was still
+          # running normally. Must stay BELOW the Job's activeDeadlineSeconds
+          # (3300) so the evidence dump sees a live pod.
+          DEADLINE=$(( $(date +%s) + 3000 ))
           # PLAT-8402: a bare tail=300 hides post-OK teardown failures — an
           # OOMKill/eviction during teardown produces no stderr at all, so the
           # only evidence is the pod's container status (reason/exitCode).
@@ -414,7 +425,7 @@ jobs:
               exit 1
             fi
             if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
-              echo "::error::backend test gate timed out after 1800s"
+              echo "::error::backend test gate timed out after 3000s"
               dump_gate_evidence
               exit 1
             fi
