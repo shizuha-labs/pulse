@@ -16,6 +16,21 @@ STALE = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 
 
 class ForgejoCurrentHeadReviewParserTests(SimpleTestCase):
+    def test_empty_string_hash_is_not_a_commit(self):
+        """PLAT-11788: sha256('') must not compare equal to itself or a head."""
+        empty_hash = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+        self.assertEqual(WorkflowService._normalize_scm_sha(empty_hash), '')
+        self.assertEqual(WorkflowService._normalize_scm_sha(''), '')
+        reviews = [{
+            'user': {'login': 'aoi'},
+            'commit_id': empty_hash,
+            'state': 'APPROVED',
+        }]
+        self.assertEqual(
+            WorkflowService._parse_forgejo_current_head_reviewers(reviews, empty_hash),
+            set(),
+        )
+
     def test_exact_normalized_commit_id_accepted(self):
         reviews = [
             {
