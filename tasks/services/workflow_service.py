@@ -34,6 +34,7 @@ from ..origin_provenance import (
     canonical_origin_pr_url,
     development_repo_block_reason,
     parse_forgejo_legacy_host_pr_url,
+    parse_linked_pr_identity,
     parse_origin_pr_legacy_singular_url,
     parse_origin_pr_reference,
     parse_origin_pr_url,
@@ -1058,10 +1059,22 @@ class WorkflowService:
         'COMMENT', 'APPROVE',
     })
 
+    # sha256('') — the value a blank string hashes to. Two empty claims both
+    # normalize to it, so an equality check would report them identical
+    # (PLAT-11788). Treat it as "no hash" rather than a commit.
+    _EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+
     @staticmethod
     def _normalize_scm_sha(value):
-        """Normalize a commit SHA for exact SoD comparison (strip + lower)."""
-        return str(value or '').strip().lower()
+        """Normalize a commit SHA for exact SoD comparison (strip + lower).
+
+        A blank value and the hash of an empty string both return '' so they
+        can never compare equal to a real commit or to each other.
+        """
+        normalized = str(value or '').strip().lower()
+        if normalized == WorkflowService._EMPTY_SHA256:
+            return ''
+        return normalized
 
     @staticmethod
     def _forgejo_review_login(row):
@@ -11235,6 +11248,17 @@ class WorkflowService:
                 # the same live-confirm supersession treatment as singular
                 # ``/pull/N`` rows (identity/repair only — never ingress).
                 legacy = parse_forgejo_legacy_host_pr_url(raw_url)
+            if not legacy:
+                # PLAT-12246: a github.com mirror row is the same class of
+                # retired identity. The re-entry gate only retires a mirror
+                # bounce key when the row itself carries superseded_by, and
+                # the MCP writer only annotates a mirror when the incoming
+                # URL matches an existing row — so re-linking the canonical
+                # Origin URL never reached it. Annotate here, where the
+                # canonical row is already provider-confirmed.
+                mirror = parse_linked_pr_identity(raw_url)
+                if mirror and raw_url.lower().startswith('https://github.com/'):
+                    legacy = mirror
             if not legacy:
                 continue
             identity = (legacy[0].lower(), legacy[1].lower(), legacy[2])
