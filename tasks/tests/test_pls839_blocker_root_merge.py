@@ -9,6 +9,7 @@ still fails closed.
 from __future__ import annotations
 
 from unittest import skipUnless
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.db import connection, transaction
@@ -41,6 +42,17 @@ class Pls839BlockerRootMergeTests(TransactionTestCase):
     reset_sequences = True
 
     def setUp(self):
+        # PLS-1164 hermetic containment: classify_roster_email performs a live
+        # shizuha-id principal lookup (c47f4fe6). These tests assert roster
+        # semantics, not identity resolution — stub the raw lookup so the
+        # resolver takes its documented unresolvable/fail-open path without
+        # touching the network (the hermetic socket guard redirects to a
+        # blackhole port, which surfaced as ConnectionError noise + reds in
+        # premerge run 9755).
+        patcher = patch('tasks.services.canonical_identity._raw_principal_lookup',
+                        return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.actor = User.objects.create_user(
             username='pls839-actor', email='pls839-actor@shizuha.com',
             password='x', is_staff=True,
