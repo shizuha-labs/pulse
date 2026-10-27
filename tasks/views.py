@@ -3345,6 +3345,16 @@ class ItemViewSet(viewsets.ModelViewSet):
                     'email': save_overrides.get('assignee_email') or serializer.validated_data.get('assignee_email'),
                 })
                 if uid is not None or email:
+                    # PLAT-11817: a no-push seat must not become the authoring
+                    # owner of a code fix. Unknown capability fails closed.
+                    from .services.push_authoring_gate import (
+                        PushAuthoringRefused, assert_can_author,
+                    )
+                    try:
+                        assert_can_author(item, email)
+                    except PushAuthoringRefused as refused:
+                        from rest_framework.exceptions import ValidationError
+                        raise ValidationError({'assignee_email': str(refused)})
                     save_overrides.update({'assignee_id': uid, 'assignee_email': email})
 
         if serializer.validated_data.get('assignment_group'):
