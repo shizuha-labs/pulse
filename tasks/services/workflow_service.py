@@ -11537,6 +11537,24 @@ class WorkflowService:
         bounced = meta.get('review_bounce_pr_heads') or {}
         if not isinstance(bounced, dict) or not bounced:
             return True, ''
+        # PLS-421 carrier / PLAT-10330 follow-through: a bounce entry whose
+        # carrier row was REMOVED from the card (retired mirror identity —
+        # e.g. the retired github.com/shizuha-labs/shizuha-tasks host — with
+        # the removal audited under removed_pull_requests) has no head to
+        # compare and can never advance. Failing closed on it would wedge the
+        # Review Passed transition forever even though the covering change
+        # moved to the canonical Origin row with its own link-time
+        # provenance. Exempt the removed identity — the same exemption class
+        # as PLS-462 terminal carriers and the PLS-1296/E sentinel filter
+        # (`_bounce_heads_without_sentinel` filters, never deletes).
+        removed_urls = set()
+        for row in (meta.get('removed_pull_requests') or []):
+            if isinstance(row, dict):
+                u = str(row.get('url') or '').rstrip('/')
+                if u:
+                    removed_urls.add(u)
+            elif isinstance(row, str) and row.strip():
+                removed_urls.add(row.strip().rstrip('/'))
         current = {}
         for pr in (meta.get('pull_requests') or []):
             if not isinstance(pr, dict):
@@ -11548,6 +11566,8 @@ class WorkflowService:
         unchanged = []
         for url, bounce_head in bounced.items():
             if str(url) == 'no-pr':
+                continue
+            if str(url).rstrip('/') in removed_urls:
                 continue
             live = current.get(str(url).rstrip('/'))
             bounced_norm = str(bounce_head or '').strip().lower()

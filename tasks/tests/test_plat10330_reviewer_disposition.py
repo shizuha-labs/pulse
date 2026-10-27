@@ -63,3 +63,47 @@ class ReviewerPassDispositionTests(SimpleTestCase):
                 transition, item, screen_data={'comment': 'approve'},
             )
         self.assertIn('PLAT-10330', str(ctx.exception))
+
+    def test_removed_retired_mirror_carrier_is_exempt(self):
+        """PLS-421 carrier: the bounce entry's carrier row was purged from the
+        card (retired github.com mirror identity, removal audited under
+        removed_pull_requests) and the covering change moved to the canonical
+        Origin row. The removed identity has no head to compare and can never
+        advance — it must not wedge Review Passed forever."""
+        gh = 'https://github.com/shizuha-labs/shizuha-tasks/pull/532'
+        meta = {
+            'pull_requests': [
+                {'url': 'https://origin.shizuha.com/shizuha-labs/pulse/pulls/868',
+                 'head_sha': 'cbc9c332', 'status': 'open'},
+            ],
+            'review_bounce_pr_heads': {gh: '0c8ec392'},
+            'removed_pull_requests': [
+                {'url': gh, 'reason': 'retired mirror identity', 'removed_at': '2026-10-22'},
+            ],
+            'open_change_request_ids': ['P1-ni'],
+        }
+        item = SimpleNamespace(metadata=meta)
+        ok, detail = WorkflowService._reviewer_pass_dispositions_open_requests(
+            item, {'comment': 'approve — covering change on the canonical Origin row'},
+        )
+        self.assertTrue(ok)
+        self.assertEqual(detail, '')
+
+    def test_stale_carrier_without_removal_audit_still_fails_closed(self):
+        """A bounce entry with NO current linked row and NO removal audit is
+        still parse ambiguity — the exemption requires the audited removal."""
+        gh = 'https://github.com/shizuha-labs/shizuha-tasks/pull/532'
+        meta = {
+            'pull_requests': [
+                {'url': 'https://origin.shizuha.com/shizuha-labs/pulse/pulls/868',
+                 'head_sha': 'cbc9c332', 'status': 'open'},
+            ],
+            'review_bounce_pr_heads': {gh: '0c8ec392'},
+            'open_change_request_ids': ['P1-ni'],
+        }
+        item = SimpleNamespace(metadata=meta)
+        ok, detail = WorkflowService._reviewer_pass_dispositions_open_requests(
+            item, {'comment': 'approve'},
+        )
+        self.assertFalse(ok)
+        self.assertIn('lacks bounce or current head provenance', detail)
