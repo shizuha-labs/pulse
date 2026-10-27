@@ -9001,6 +9001,21 @@ def sweep_org_health(self):
             _org_health_outage_clear_evidence(W, sig, now)
             or 'condition no longer detected'
         )
+        # PLS-1440 (PLAT-11610 carrier episode): signal absence must never
+        # terminalize a carrier while the availability walk still detects the
+        # outage. "Neither leg cleared" means the availability walk contradicts
+        # signal absence (down roster AND items still queued with no routable
+        # peer) — the two legs contradict and the clear side loses. Refuse the
+        # unlawful auto-resolve and latch the carrier (PLAT-4837: latched
+        # outage, not recovery) so the standing whole-team outage and its
+        # stranded demand stay visible.
+        if 'neither leg cleared' in (cleared_detail or ''):
+            logger.warning(
+                f"sweep_org_health: {sig} absent streak {absent}/{_clear_debounce} but "
+                f"availability walk still detects the outage (neither leg cleared) — "
+                f"REFUSING unlawful auto-resolve, carrier latched "
+                f"(PLS-1440/PLAT-4837/PLAT-11610)")
+            continue
         try:
             reconciliation = _reconcile_org_health_signal_carriers(
                 sig,

@@ -271,3 +271,89 @@ class TeamOutageRecurrenceLinkingTests(TestCase):
         self.assertIn(first_carrier.item_key, successor.description)
         self.assertIn('cumulative age', successor.description)
         self.assertIn('relates_to', successor.description)
+
+
+class TeamUnlawfulResolveTests(TestCase):
+    """PLS-1440 regression: an outage resolution is unlawful when the
+    availability walk still detects the condition."""
+
+    setUp = TeamOutageClearDebounceTests.setUp
+
+    def _sweep_with(self, availability_reasons, clear_evidence):
+        return TeamOutageClearDebounceTests._sweep_with(self, availability_reasons, clear_evidence)
+
+    def test_resolves_refused_when_walk_still_detects(self):
+        # Harness note: the availability-walk mock drives DETECTOR PRESENCE,
+        # while the clear-time availability re-read is
+        # `_org_health_outage_clear_evidence` (mocked separately). The live
+        # PLAT-11610 shape — detector quiet for 2+ cycles while the CLEAR-TIME
+        # walk still reports every seat seat_not_live and demand still queued —
+        # is therefore simulated with an UP walk (signal absent → the clear-side
+        # streak accumulates) plus a 'neither leg cleared' evidence re-read.
+        # With a DOWN walk the signal stays present, the streak resets, and the
+        # clear leg (and this refusal) is unreachable — the vacuous pass that
+        # hid this from run 9001 until the lawful-recovery test failed.
+        down = {
+            'nami@shizuha.com': ['seat_not_live'],
+            'mika@shizuha.com': ['seat_not_live'],
+        }
+        _mk_task(self.project, 'qa-pls854', key='PLX-9003')
+        self._sweep_with(down, None)   # fire (fire sweep resets the streak)
+        carrier = Item.objects.filter(
+            metadata__org_health_signal='zero-member-outage:1:qa-pls854',
+        ).first()
+        self.assertIsNotNone(carrier)
+
+        up = {
+            'nami@shizuha.com': ['available'],
+            'mika@shizuha.com': ['available'],
+        }
+        unlawful = ('signal absent for 2+ consecutive detector cycles - '
+                    'neither leg cleared (unexpected clear while condition '
+                    'still detected); 0/2 member(s) readable-available now; '
+                    'queued=1 at clear time; roster=[all seat_not_live] '
+                    '(PLS-1440-test)')
+        for _ in range(4):
+            result = self._sweep_with(up, unlawful)
+            carrier.refresh_from_db()
+            self.assertEqual(result['admin_resolved'], 0)
+            self.assertFalse(_is_terminal_status(carrier.status))
+
+    def test_later_lawful_recovery_still_clears(self):
+        down = {
+            'nami@shizuha.com': ['seat_not_live'],
+            'mika@shizuha.com': ['seat_not_live'],
+        }
+        _mk_task(self.project, 'qa-pls854', key='PLX-9004')
+        self._sweep_with(down, None)   # fire (fire sweep resets the streak)
+        carrier = Item.objects.filter(
+            metadata__org_health_signal='zero-member-outage:1:qa-pls854',
+        ).first()
+        self.assertIsNotNone(carrier)
+
+        up = {
+            'nami@shizuha.com': ['available'],
+            'mika@shizuha.com': ['available'],
+        }
+        unlawful = ('signal absent for 2+ detector cycles - neither leg '
+                    'cleared (condition still detected) (PLS-1440-test)')
+        # Absent streak 1/2: below the clear debounce — kept regardless.
+        first = self._sweep_with(up, unlawful)
+        self.assertEqual(first['admin_resolved'], 0)
+        # Absent streak 2/2: clear leg reached, but the clear-time walk
+        # contradicts signal absence (neither leg cleared) → refused, latched.
+        second = self._sweep_with(up, unlawful)
+        self.assertEqual(second['admin_resolved'], 0)
+        carrier.refresh_from_db()
+        self.assertFalse(_is_terminal_status(carrier.status))
+
+        lawful = ('signal absent for 2+ detector cycles - both legs cleared '
+                  '(availability leg AND queue leg); 2/2 member(s) '
+                  'readable-available now (PLS-1440-test)')
+        # The refusal latch is not a terminal state: the first clear-time walk
+        # that AGREES with signal absence (both legs cleared) resolves the
+        # carrier — the streak is already past the debounce.
+        third = self._sweep_with(up, lawful)
+        self.assertEqual(third['admin_resolved'], 1)
+        carrier.refresh_from_db()
+        self.assertTrue(_is_terminal_status(carrier.status))
