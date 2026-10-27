@@ -12951,20 +12951,30 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                     )
                     continue
                 # PLS-488 / HIVE-626: a direct Architecture assignee on an
-                # architecture-review item must not be replaced by an Engineering
-                # implementer while that assignee is unavailable. Hold fail-loud.
+                # architecture-review item must not be replaced by an
+                # Engineering implementer while that assignee is unavailable.
+                # PLS-421 AC1: substitute another resident Architecture-seat
+                # peer when one exists; AC2: hold fail-loud when none does,
+                # never falling back to the workflow's generic team.
+                direct_review_failover = False
                 if _hive626_direct_review_hold(it, de, pod):
-                    logger.warning(
-                        "HIVE-626: holding %s — architecture-review direct assignee %s "
-                        "is unavailable; refusing Engineering implementer failover",
-                        it.item_key or it.pk, de,
-                    )
-                    WorkflowService._record_routability_hold(
-                        it, pod, ['direct_review_authority'],
-                        source='hive-626-direct-review',
-                        attempted_email=de,
-                    )
-                    continue
+                    _sub_uid, _sub_email = _resolve_direct_review_failover_target(
+                        it, de)
+                    if not _sub_email:
+                        logger.warning(
+                            "HIVE-626: holding %s — architecture-review direct assignee %s "
+                            "is unavailable and no compatible Architecture substitute exists; "
+                            "refusing Engineering implementer failover",
+                            it.item_key or it.pk, de,
+                        )
+                        WorkflowService._record_routability_hold(
+                            it, pod, ['direct_review_authority'],
+                            source='hive-626-direct-review',
+                            attempted_email=de,
+                        )
+                        continue
+                    to_uid, to_email = _sub_uid, _sub_email
+                    direct_review_failover = True
                 _linked_blocked_handled, _linked_blocked_moved = (
                     _clear_linked_blocked_down_owner(it, de, duid)
                 )
@@ -13032,21 +13042,23 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                 # decision-owner must never bounce back to the symptom-team pool. If
                 # the pinned owner is hard-down, fail over within the pinned decision
                 # team only; if no decision-team peer is available, leave it in place.
-                pinned_failover = _is_decision_pinned(it)
-                if pinned_failover:
-                    to_uid, to_email = _resolve_decision_pin_failover_target(it, de)
-                    if not to_email:
-                        logger.warning(
-                            "PLS-233: decision-pinned item %s could not fail over within "
-                            "pinned team %r from down owner %s — leaving in place",
-                            it.item_key or it.pk, _decision_pinned_team(it), de,
-                        )
-                        continue
+                pinned_failover = False
+                if not direct_review_failover:
+                    pinned_failover = _is_decision_pinned(it)
+                    if pinned_failover:
+                        to_uid, to_email = _resolve_decision_pin_failover_target(it, de)
+                        if not to_email:
+                            logger.warning(
+                                "PLS-233: decision-pinned item %s could not fail over within "
+                                "pinned team %r from down owner %s — leaving in place",
+                                it.item_key or it.pk, _decision_pinned_team(it), de,
+                            )
+                            continue
                 # Require an under-cap live peer. PLS-157: within the eligible
                 # list, prefer native members before cross-team failover members.
                 # PLS-198 (F3): belt-and-braces per-candidate identity check on top
                 # of the members-level exclusion above.
-                if not pinned_failover:
+                if not pinned_failover and not direct_review_failover:
                     if WorkflowService._routability_enforced():
                         live_candidates = []
                         candidate_reasons = []
@@ -13196,9 +13208,35 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                     if (fresh.assignee_id == to_uid
                             or WorkflowService._emails_same_agent_identity(fresh.assignee_email, to_email)):
                         continue  # no-op reassignment — already on the target identity
+                    # PLS-421 AC1: the write-guard must score the substitute seat
+                    # against the seat's OWN roster team, not the item's
+                    # in-progress assignment_group. An Architecture reviewer seat
+                    # is never a member of the implementation pod, so scoring
+                    # nova against `engineering` always yields
+                    # `seat_not_team_member` and silently defeated substitution
+                    # while AC2's fail-loud hold looked correct (premerge run
+                    # 9574 census: resolver returned nova, verdict rejected the
+                    # write on membership). Live/capability/capacity checks are
+                    # unchanged — only the roster-team context of the verdict.
+                    _seat_team = pod
+                    if direct_review_failover:
+                        _seat_team = (
+                            _direct_review_failover_seat_team(de) or pod
+                        )
+                        # Re-scope the lane BEFORE the seat verdict and the WIP
+                        # reservation mint: the reservation records the team it
+                        # was minted against and Item.save's consumption check
+                        # requires team == reservation.assignment_group — a
+                        # post-mint rescope reads as
+                        # `wip_reservation_target_mismatch` (premerge run 9580).
+                        # Rescoped here, the reservation, the PLAT-4213
+                        # membership fence, and the PLS-408 reconciliation all
+                        # see the same Architecture lane.
+                        fresh.assignment_group = _seat_team
+                    _group_changed = direct_review_failover
                     write_verdict = WorkflowService._seat_routability_verdict(
                         fresh,
-                        pod,
+                        _seat_team,
                         to_email,
                         intent='new_assignment',
                         enforce_cap=_cap_enforced_pod,
@@ -13222,6 +13260,14 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                         continue
                     admitted = WorkflowService._reserve_wip_slot(
                         fresh, to_uid, to_email,
+                        # PLS-421 AC1: the direct-review substitution crosses
+                        # lanes (engineering -> architecture). Reserve against
+                        # the EFFECTIVE destination — the same override the
+                        # routing-authority REROUTE path uses — or Item.save()'s
+                        # reservation consumption compares the seat team against
+                        # a mint-time engineering reservation and rejects with
+                        # `wip_reservation_target_mismatch` (premerge run 9580).
+                        assignment_group_override=_seat_team,
                     )
                     if admitted is False:
                         logger.warning(
@@ -13245,6 +13291,8 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                     update_fields = ['assignee_id', 'assignee_email', 'updated_at']
                     if not (fresh.assignment_group or '').strip():
                         fresh.assignment_group = pod
+                        _group_changed = True
+                    if _group_changed:
                         update_fields.append('assignment_group')
                     # A stale marker must never survive a generic failover with
                     # an assignee it no longer authenticates.  Otherwise a later
@@ -13319,10 +13367,17 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                         )
                 # PLS-198 (F5): dedupe backstop — never post an identical
                 # auto-failover system comment twice within the window.
-                _create_system_comment_deduped(
-                    fresh,
-                    f'Auto-failover to **{to_email}** — primary **{de}** is unavailable '
-                    f'(offline/provider-unavailable/operator-disabled/hibernated).')
+                if direct_review_failover:
+                    _create_system_comment_deduped(
+                        fresh,
+                        f'Auto-failover to **{to_email}** — independent Architecture review '
+                        f'seat preserved: primary **{de}** is unavailable and the substitute '
+                        f'satisfies the architecture-review seat constraints (PLS-421).')
+                else:
+                    _create_system_comment_deduped(
+                        fresh,
+                        f'Auto-failover to **{to_email}** — primary **{de}** is unavailable '
+                        f'(offline/provider-unavailable/operator-disabled/hibernated).')
                 # PLAT-390 (Codex P2): only count it as ACTIVE load if the
                 # drained item is hands-on. drain_all_items() also moves
                 # review-pipeline work (in_review/in_qa/awaiting_merge), which
@@ -14509,6 +14564,101 @@ def _hive626_direct_review_hold(item, down_email, pod):
     if not WorkflowService._item_has_label(item, 'architecture-review'):
         return False
     return bool(WorkflowService._is_architecture_team_email(down_email))
+
+
+def _resolve_direct_review_failover_target(item, down_email):
+    """PLS-421 AC1: substitute a seat that still satisfies the original direct
+    assignee's seat constraints instead of holding unconditionally.
+
+    The item's in-progress workflow group is the implementation team; failing
+    over from it hands an independent Architecture exact-version review to an
+    Engineering implementer (the live HIVE-626 regression). The only
+    compatible substitute is another seat on the current Architecture roster
+    that is not the down identity and not the item author (independence /
+    no-self-review). Ranked by active then workable load. Returns (None, None)
+    when no compatible substitute exists — the caller then holds fail-loud
+    (AC2) instead of falling back to the workflow's generic team.
+    """
+    from .models import TeamRoster
+    from .user_service import user_service
+    from .services.workflow_service import WorkflowService
+
+    try:
+        rows = [
+            roster for roster in TeamRoster.objects.filter(
+                is_active=True,
+                organization_slug='shizuha',
+            )
+            if WorkflowService._canonical_team_name(roster.team_name) == 'architecture'
+        ]
+        if len(rows) != 1:
+            logger.error(
+                'PLS-421: architecture roster claim denied: expected one current '
+                'roster, got %d', len(rows),
+            )
+            return None, None
+        emails = WorkflowService._flat_roster(rows[0].tiers or [])
+        emails += list(rows[0].junior_emails or [])
+    except Exception:
+        logger.exception('PLS-421: architecture roster enumeration failed')
+        return None, None
+
+    author_email = (getattr(item, 'created_by_email', '') or '').strip().lower()
+    best = (None, None)
+    best_key = None
+    for candidate in emails:
+        candidate = (candidate or '').strip()
+        if not candidate:
+            continue
+        if down_email and WorkflowService._emails_same_agent_identity(
+                candidate, down_email):
+            continue
+        try:
+            info = user_service.get_user_by_email(candidate)
+            uid = info.get('id') if info else None
+            if not uid or not str(uid).isdigit():
+                continue
+            uid = int(uid)
+        except Exception:
+            continue
+        # A hibernated seat cannot act on the review; require a resident seat.
+        if not WorkflowService._is_agent_available_for_assignment(candidate):
+            continue
+        required_caps = WorkflowService._task_required_capabilities(item)
+        if not WorkflowService._member_can_execute_from_status(
+                candidate, item, user_id=uid):
+            continue
+        if not WorkflowService._seat_satisfies_required_capability(
+                candidate, required_caps, item=item):
+            continue
+        if author_email and WorkflowService._emails_same_agent_identity(
+                candidate, author_email):
+            continue  # no-self-review independence constraint
+        key = (
+            WorkflowService._agent_active_load(uid, candidate),
+            WorkflowService._agent_workable_load(uid, candidate),
+        )
+        if best_key is None or key < best_key:
+            best_key = key
+            best = (uid, candidate)
+    return best
+
+
+def _direct_review_failover_seat_team(down_email):
+    """PLS-421 AC1: the roster team a direct-review substitute seat belongs to.
+
+    The failover write-guard must evaluate the substitute against the seat's
+    OWN team context, not the item's in-progress ``assignment_group`` — a
+    resident Architecture reviewer is never a member of the implementation
+    pod, so an engineering-grouped verdict always yields
+    ``seat_not_team_member`` and silently converts AC1 substitution into the
+    AC2-style hold. Returns None when the down owner is not a direct-review
+    Architecture seat (caller keeps the workflow group).
+    """
+    from .services.workflow_service import WorkflowService
+    if WorkflowService._is_architecture_team_email(down_email):
+        return 'architecture'
+    return None
 
 
 @shared_task(bind=True)
