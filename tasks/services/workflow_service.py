@@ -20,6 +20,7 @@ import logging
 import hashlib
 import os
 import re
+import urllib.parse
 from collections import Counter
 from dataclasses import dataclass
 
@@ -11462,6 +11463,20 @@ class WorkflowService:
             def read(url, **kwargs):
                 result = _requests.get(
                     url, headers=headers, timeout=5, allow_redirects=False, **kwargs)
+                # PLS-1464: a renamed first-party repo 301s the legacy path
+                # (shizuha-tasks -> pulse). Follow one same-host redirect only.
+                # Cross-host redirects stay rejected (anti-SSRF).
+                if result.status_code in (301, 302, 307, 308):
+                    loc = result.headers.get('Location') or ''
+                    parsed = urllib.parse.urlparse(loc)
+                    origin_host = urllib.parse.urlparse(origin).netloc
+                    if (parsed.scheme not in ('http', 'https')
+                            or parsed.netloc != origin_host
+                            or not parsed.path.startswith('/api/v1/repos/')):
+                        raise ValueError('review authority redirect left the origin host')
+                    result = _requests.get(
+                        urllib.parse.urlunparse(parsed), headers=headers,
+                        timeout=5, allow_redirects=False, **kwargs)
                 if result.status_code != 200:
                     raise ValueError('review authority requires direct HTTP 200')
                 return result.json()
