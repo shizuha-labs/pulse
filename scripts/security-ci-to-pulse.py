@@ -1269,7 +1269,37 @@ def pulse_upsert_ledger(
     }
     if args.project_id:
         body["project"] = int(args.project_id)
-    created = pulse_request("POST", f"{api_base}/items/", token, body)
+    try:
+        created = pulse_request("POST", f"{api_base}/items/", token, body)
+    except RuntimeError as exc:
+        # PLAT-12545: the list probe can miss a live ledger (source_id not
+        # indexed, or a row created between probe and POST). Pulse then
+        # rejects the create with "source, source_id must make a unique set".
+        # A retry of the same POST fails the same way. Re-probe and PATCH.
+        if "must make a unique set" not in str(exc):
+            raise
+        print(
+            f"WARN: ledger create raced an existing source_id={source_id!r}; re-probing",
+            file=sys.stderr,
+        )
+        raced, _stale = pulse_resolve_ledger_target(api_base, token, source_id)
+        if not raced:
+            raise
+        ref = str(raced.get("item_key") or raced.get("id"))
+        labels = [l for l in (raced.get("labels") or []) if isinstance(l, str)]
+        new_labels = [
+            l for l in labels
+            if not l.startswith("ledger-hash:") and l != "durable-write-failed"
+        ] + [hash_label]
+        if not wiki_ledger.ok:
+            new_labels.append("durable-write-failed")
+        pulse_request(
+            "PATCH", f"{api_base}/items/{raced.get('id') or ref}/", token,
+            {"description": description, "labels": new_labels,
+             "priority": PRIORITY.get(max_sev, "normal"),
+             "append_origin_observations": [origin_observation(args)]},
+        )
+        return f"ledger-updated:{ref}"
     ref = created.get("item_key") or created.get("id")
     try:
         if created.get("assignee") or created.get("assignee_id"):

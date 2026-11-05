@@ -619,6 +619,47 @@ def test_ledger_absent_path_still_creates_when_probe_finds_nothing(monkeypatch):
     assert ("POST/items",) in calls
 
 
+def test_ledger_unique_set_400_reprobes_and_patches(monkeypatch):
+    """PLAT-12545: a missed probe plus POST unique-set 400 must PATCH, not raise.
+
+    id run 810: POST /items/ -> HTTP 400 source, source_id must make a unique
+    set. The workflow then retried the same contract error three times.
+    """
+    module = load_module()
+    SID = "security-ci:shizuha-labs/books:ledger"
+    calls = []
+    probes = {"n": 0}
+
+    def fake_resolve(api_base, token, source_id):
+        probes["n"] += 1
+        if probes["n"] == 1:
+            return None, []
+        row = _detail_payload(SID, item_key="PLAT-LED", ident=42, status="open",
+                              status_category="in_progress")
+        return row, []
+
+    def fake_request(method, url, token, body=None):
+        calls.append((method, url, body))
+        if method == "POST" and url.rstrip("/").endswith("/items"):
+            raise RuntimeError(
+                'POST http://pulse/api/items/ -> HTTP 400: '
+                '{"non_field_errors":["The fields source, source_id must make a unique set."]}'
+            )
+        if method == "PATCH":
+            return {"id": 42, "item_key": "PLAT-LED"}
+        raise AssertionError(("unexpected", method, url))
+
+    monkeypatch.setattr(module, "pulse_resolve_ledger_target", fake_resolve)
+    monkeypatch.setattr(module, "pulse_request", fake_request)
+    result = module.pulse_upsert_ledger(
+        "http://pulse/api", "tok", [], _ledger_args(repo="shizuha-labs/books"),
+        module.WikiLedgerResult(ok=True, page_url="https://wiki.shizuha.com/p", page_id="p", action="updated"),
+    )
+    assert result == "ledger-updated:PLAT-LED"
+    assert probes["n"] >= 2
+    assert any(m == "PATCH" for m, _, _ in calls)
+
+
 def test_new_pulse_finding_payload_routes_security(monkeypatch):
     module = load_module()
     posts = []
