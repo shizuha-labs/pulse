@@ -1382,6 +1382,282 @@ class AtomicWipAdmissionTests(TransactionTestCase):
             1,
         )
 
+    def test_same_team_transition_clears_foreign_source_owner_when_exact_org_seat_unavailable(self):
+        """PLS-776: BKST-5 shape clears a stale owner before final validation."""
+        from django.db import connection
+        from tasks.models import (
+            Comment,
+            Item,
+            ItemActivity,
+            Project,
+            Status,
+            TeamRoster,
+            WipSlotReservation,
+            Workflow,
+            WorkflowStatus,
+            WorkflowTransition,
+        )
+
+        source = get_user_model().objects.create_user(
+            username='pls776-source',
+            email='source@shizuha-digital.example',
+            password='unused',
+            is_staff=True,
+        )
+        destination_email = self.EMAIL
+        project = Project.objects.create(
+            org_id=3,
+            name='PLS 776 Books exact-org reproduction',
+            key='P776',
+        )
+        TeamRoster.objects.update_or_create(
+            organization_id=3,
+            team_name='engineering',
+            defaults={
+                'organization_slug': 'shizuha-trading',
+                'tiers': [[destination_email]],
+                'junior_emails': [destination_email],
+                'is_active': True,
+                'wip_enforced': True,
+                'ready_wip_cap': 2,
+                'active_wip_cap': 2,
+            },
+        )
+        WorkflowService._invalidate_team_roster_caches()
+
+        needs_triage, _ = Status.objects.get_or_create(
+            slug='needs_triage',
+            defaults={'name': 'Needs Triage', 'category': 'todo'},
+        )
+        open_status, _ = Status.objects.get_or_create(
+            slug='open',
+            defaults={'name': 'Open', 'category': 'todo'},
+        )
+        workflow = Workflow.objects.create(
+            name='PLS 776 BKST transition handoff',
+            slug='pls-776-bkst-transition-handoff',
+            initial_status=needs_triage,
+            is_active=True,
+        )
+        WorkflowStatus.objects.create(
+            workflow=workflow, status=needs_triage, position=0,
+        )
+        WorkflowStatus.objects.create(
+            workflow=workflow, status=open_status, position=1,
+        )
+        transition = WorkflowTransition.objects.create(
+            workflow=workflow,
+            name='Triage to Engineering',
+            from_status='needs_triage',
+            to_status='open',
+            position=0,
+            post_functions=[{'type': 'assign_team', 'value': 'engineering'}],
+        )
+        item = Item.objects.create(
+            title='BKST-5 production-order reproduction',
+            mode='task',
+            status='needs_triage',
+            workflow_status='Needs Triage',
+            priority='high',
+            assignment_group='engineering',
+            workflow_name=workflow.slug,
+            project=project,
+        )
+        # Production state was created before the exact-org validation fence:
+        # the group already names the destination, but the concrete owner is a
+        # source-org agent who is not in the destination exact-org roster.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                'ALTER TABLE tasks_task DISABLE TRIGGER '
+                'tasks_item_assignment_org_guard'
+            )
+            try:
+                Item.objects.filter(pk=item.pk).update(
+                    assignee_id=source.id,
+                    assignee_email=source.email,
+                    created_by_id=source.id,
+                    created_by_email=source.email,
+                )
+            finally:
+                cursor.execute(
+                    'ALTER TABLE tasks_task ENABLE TRIGGER '
+                    'tasks_item_assignment_org_guard'
+                )
+        item.refresh_from_db()
+
+        client = APIClient()
+        client.force_authenticate(user=source)
+        with patch(
+            'tasks.services.admin_service.admin_service.get_organization',
+            return_value={
+                'id': 3,
+                'slug': 'shizuha-trading',
+                'name': 'Shizuha Trading',
+            },
+        ), patch(
+            'tasks.user_service.user_service', self._user_service(),
+        ), patch.object(
+            WorkflowService,
+            '_is_agent_available_for_assignment',
+            return_value=False,
+        ):
+            response = client.post(
+                f'/api/items/{item.pk}/execute-transition/',
+                {'transition_id': str(transition.id)},
+                format='json',
+            )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        item.refresh_from_db()
+        self.assertEqual(item.status, 'open')
+        self.assertEqual(item.assignment_group, 'engineering')
+        self.assertIsNone(item.assignee_id)
+        self.assertFalse(item.assignee_email)
+        self.assertFalse(WipSlotReservation.objects.exists())
+        self.assertEqual(
+            Comment.objects.filter(
+                item=item,
+                origin_event='resolver.routability_hold',
+            ).count(),
+            1,
+        )
+        self.assertEqual(
+            ItemActivity.objects.filter(
+                item=item,
+                action='status_changed',
+            ).count(),
+            1,
+        )
+
+    def test_foreign_org_destination_still_rejects_without_clearing_source_tuple(self):
+        """PLS-776: a foreign lane is not a legal destination group queue."""
+        from tasks.models import (
+            Item,
+            ItemActivity,
+            Project,
+            Status,
+            TeamRoster,
+            WipSlotReservation,
+            Workflow,
+            WorkflowStatus,
+            WorkflowTransition,
+        )
+
+        source = get_user_model().objects.create_user(
+            username='pls776-foreign-destination-source',
+            email='source@shizuha-trading.example',
+            password='unused',
+            is_staff=True,
+        )
+        project = Project.objects.create(
+            org_id=3,
+            name='PLS 776 foreign destination rejection',
+            key='P776F',
+        )
+        TeamRoster.objects.update_or_create(
+            organization_id=3,
+            team_name='engineering',
+            defaults={
+                'organization_slug': 'shizuha-trading',
+                'tiers': [[source.email]],
+                'junior_emails': [source.email],
+                'is_active': True,
+            },
+        )
+        TeamRoster.objects.update_or_create(
+            organization_id=2,
+            team_name='architecture',
+            defaults={
+                'organization_slug': 'shizuha-digital',
+                'tiers': [[self.EMAIL]],
+                'junior_emails': [self.EMAIL],
+                'is_active': True,
+            },
+        )
+        WorkflowService._invalidate_team_roster_caches()
+
+        needs_triage, _ = Status.objects.get_or_create(
+            slug='needs_triage',
+            defaults={'name': 'Needs Triage', 'category': 'todo'},
+        )
+        open_status, _ = Status.objects.get_or_create(
+            slug='open',
+            defaults={'name': 'Open', 'category': 'todo'},
+        )
+        workflow = Workflow.objects.create(
+            name='PLS 776 foreign-org transition',
+            slug='pls-776-foreign-org-transition',
+            initial_status=needs_triage,
+            is_active=True,
+        )
+        WorkflowStatus.objects.create(
+            workflow=workflow, status=needs_triage, position=0,
+        )
+        WorkflowStatus.objects.create(
+            workflow=workflow, status=open_status, position=1,
+        )
+        transition = WorkflowTransition.objects.create(
+            workflow=workflow,
+            name='Triage to foreign Architecture',
+            from_status='needs_triage',
+            to_status='open',
+            position=0,
+            post_functions=[{'type': 'assign_team', 'value': 'architecture'}],
+        )
+
+        organization = {
+            'id': 3,
+            'slug': 'shizuha-trading',
+            'name': 'Shizuha Trading',
+        }
+        with patch(
+            'tasks.services.admin_service.admin_service.get_organization',
+            return_value=organization,
+        ):
+            item = Item.objects.create(
+                title='foreign destination rejection reproduction',
+                mode='task',
+                status='needs_triage',
+                workflow_status='Needs Triage',
+                priority='high',
+                assignment_group='engineering',
+                assignee_id=source.id,
+                assignee_email=source.email,
+                created_by_id=source.id,
+                created_by_email=source.email,
+                workflow_name=workflow.slug,
+                project=project,
+            )
+            activity_count = ItemActivity.objects.filter(item=item).count()
+
+            client = APIClient()
+            client.force_authenticate(user=source)
+            with patch(
+                'tasks.user_service.user_service', self._user_service(),
+            ), patch.object(
+                WorkflowService,
+                '_is_agent_available_for_assignment',
+                return_value=False,
+            ):
+                response = client.post(
+                    f'/api/items/{item.pk}/execute-transition/',
+                    {'transition_id': str(transition.id)},
+                    format='json',
+                )
+
+        self.assertEqual(response.status_code, 409, response.content)
+        self.assertEqual(response.data['error'], 'transition_validation_failed')
+        item.refresh_from_db()
+        self.assertEqual(item.status, 'needs_triage')
+        self.assertEqual(item.assignment_group, 'engineering')
+        self.assertEqual(item.assignee_id, source.id)
+        self.assertEqual(item.assignee_email, source.email)
+        self.assertFalse(WipSlotReservation.objects.exists())
+        self.assertEqual(
+            ItemActivity.objects.filter(item=item).count(),
+            activity_count,
+        )
+
     def test_cross_team_transition_validation_is_typed_and_rolls_back(self):
         """Final handoff denial is HTTP 409 with no partial state or token."""
         from django.core.exceptions import ValidationError

@@ -464,6 +464,13 @@ class AssignTeamFiringUserArmedBindingTests(TestCase):
         ), patch(
             'tasks.services.routing_authority.binding_candidates_for_item',
             side_effect=RuntimeError('authority dark'),
+        ), patch(
+            # PLS-776 carrier: execute_post_functions now consults the
+            # destination snapshot before routing; supply a valid unstaffed
+            # exact-org destination so this test keeps exercising its actual
+            # premise (dark admission authority fails open on exclusion).
+            'tasks.services.routing_authority.routing_candidate_snapshot_for_item',
+            return_value={'source': 'team_roster', 'tiers': []},
         ), patch.object(
             WorkflowService,
             '_resolve_team_assignee',

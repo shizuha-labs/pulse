@@ -57,7 +57,6 @@ class TeamOutageCarrierContentTests(TestCase):
             team_name='qa-pls854', tiers=[['nami@shizuha.com', 'mika@shizuha.com']],
             is_active=True,
         )
-
     def _fire_outage(self, availability_reasons):
         with patch('tasks.tasks._org_health_exporter_fresh', return_value=True), \
                 patch('tasks.tasks._org_health_candidate_availability',
@@ -130,6 +129,21 @@ class TeamOutageClearDebounceTests(TestCase):
             team_name='qa-pls854', tiers=[['nami@shizuha.com', 'mika@shizuha.com']],
             is_active=True,
         )
+        # The clear debounce counts consecutive absent cycles in a shared Redis
+        # key (pulse:org_health_absent_streak:<sig>, 3600s TTL) that nothing
+        # resets between tests. An earlier sweep in the same process leaves it
+        # >= 2, so the first recovered sweep resolves the carrier and this test
+        # sees admin_resolved == 1. Drop the cached client first: a previous
+        # test may have cached one pointed at a different broker URL.
+        WorkflowService._redis_client_cache = None
+        for sig in ('zero-member-outage:1:qa-pls854', 'zero-member-team:1:qa-pls854'):
+            for kind in ('streak', 'absent_streak'):
+                try:
+                    WorkflowService._redis_client().delete(
+                        f'pulse:org_health_{kind}:{sig}')
+                except Exception:
+                    pass
+
 
     def _sweep_with(self, availability_reasons, clear_evidence):
         with patch('tasks.tasks._org_health_exporter_fresh', return_value=True), \
