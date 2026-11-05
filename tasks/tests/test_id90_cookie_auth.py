@@ -42,11 +42,12 @@ class CookieAuthTests(TestCase):
         # PLAT-11893: super() binds the plain function to the instance, so the
         # fake receives (instance, request) — declare both.
         from rest_framework_simplejwt.authentication import JWTAuthentication
+        original = JWTAuthentication.authenticate
         JWTAuthentication.authenticate = fake_super
         try:
             user, token = self.auth.authenticate(request)
         finally:
-            del JWTAuthentication.authenticate
+            JWTAuthentication.authenticate = original
         self.assertEqual((user, token), ('header-user', 'header-token'))
         self.assertIn('Bearer header-token', called['header'])
 

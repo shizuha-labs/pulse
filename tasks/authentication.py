@@ -453,7 +453,11 @@ class ShizuhaJWTAuthentication(JWTAuthentication):
     def authenticate(self, request):
         header = self.get_header(request)
         if header is not None:
-            return super().authenticate(request)
+            # A present Authorization header is the Bearer path. Delegate to
+            # the simplejwt implementation, not BaseAuthentication, whose
+            # authenticate() is abstract and raises NotImplementedError (a 500
+            # instead of a 401 for a non-JWT bearer such as a service token).
+            return JWTAuthentication.authenticate(self, request)
         raw = request.COOKIES.get(self._access_cookie_name())
         if not raw:
             return None
