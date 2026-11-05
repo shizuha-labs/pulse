@@ -41,6 +41,14 @@ from .permissions import PermissionService
 logger = logging.getLogger(__name__)
 
 SCHEMA = "shizuha.pulse.escalation-evidence.v1"
+
+# PLAT-11158 surface 2 (consume-anchored JIT TTL, contract PLAT-11154
+# comment 1005344): a receipt stays gate-valid while it has never been
+# consumed, and for a bounded window after its first consumption. Past the
+# window it is spent; an unconsumed receipt past the dormancy window is
+# flagged for re-request (revocation with audit) by the dormancy sweep.
+RECEIPT_POST_CONSUME_WINDOW = timedelta(days=7)
+RECEIPT_DORMANCY_WINDOW = timedelta(days=14)
 TOP_KEYS = {"schema", "request_id", "expected_generation", "dependency", "technical_action"}
 DEPENDENCY_KEYS = {
     "evidence_class", "requested_kind", "requested_subject", "holder_type",
@@ -1539,7 +1547,88 @@ def _receipt_payload(receipt: EscalationRoutingReceipt, *, replayed: bool) -> di
         "actor_assertion_digest": receipt.actor_assertion_digest,
         "replayed": bool(replayed),
         "replayed_disposition": bool(receipt.replayed_disposition),
+        **receipt_gate_fields(receipt),
     }
+
+
+def receipt_gate_fields(
+    receipt: EscalationRoutingReceipt, *, now=None, window=None
+) -> dict:
+    """PLAT-11158: consume-anchored gate state of a receipt.
+
+    The gate verdict replaces a bare "receipt exists" check: a receipt is
+    ``unconsumed_valid`` while it has never been consumed, ``consumed_within_window``
+    for RECEIPT_POST_CONSUME_WINDOW after its first consume event, and ``spent``
+    afterwards. ``consumed_at`` is part of the payload so consume events are
+    reconstructible from the receipt trail alone (ledger audit acceptance).
+    """
+    window = RECEIPT_POST_CONSUME_WINDOW if window is None else window
+    consumed_at = getattr(receipt, "consumed_at", None)
+    consumed_by = getattr(receipt, "consumed_by_transition_id", None)
+    if consumed_at is None:
+        return {
+            "consumed_at": None,
+            "consumed_by_transition_id": str(consumed_by) if consumed_by else None,
+            "gate_state": "unconsumed_valid",
+        }
+    if now is None:
+        now = timezone.now()
+    state = (
+        "consumed_within_window"
+        if now - consumed_at <= window
+        else "spent"
+    )
+    return {
+        "consumed_at": consumed_at,
+        "consumed_by_transition_id": str(consumed_by) if consumed_by else None,
+        "gate_state": state,
+    }
+
+
+def mark_receipt_consumed(
+    receipt: EscalationRoutingReceipt, *, transition_id, when=None
+) -> bool:
+    """Stamp the consume event on a receipt; first stamp wins, idempotent.
+
+    Returns True when THIS call performed the first stamp (the consume event),
+    False when the receipt was already consumed.
+    """
+    if receipt.consumed_at is not None:
+        return False
+    if when is None:
+        when = timezone.now()
+    updated = type(receipt).objects.filter(
+        pk=receipt.pk, consumed_at__isnull=True,
+    ).update(
+        consumed_at=when, consumed_by_transition_id=transition_id,
+    )
+    if updated:
+        receipt.consumed_at = when
+        receipt.consumed_by_transition_id = transition_id
+    return bool(updated)
+
+
+def flag_dormant_receipts(*, dormancy_days=None, now=None):
+    """Flag unconsumed receipts past the dormancy window for re-request.
+
+    PLAT-11154 contract point 4: an approval that is never consumed must not
+    stay valid forever. Returns (flagged_count, queryset of flagged receipts).
+    """
+    window = RECEIPT_DORMANCY_WINDOW if dormancy_days is None else timedelta(days=dormancy_days)
+    if now is None:
+        now = timezone.now()
+    cutoff = now - window
+    stale = EscalationRoutingReceipt.objects.filter(
+        consumed_at__isnull=True,
+        dormancy_flagged_at__isnull=True,
+        created_at__lt=cutoff,
+    )
+    flagged = list(stale)
+    if flagged:
+        EscalationRoutingReceipt.objects.filter(
+            pk__in=[r.pk for r in flagged],
+        ).update(dormancy_flagged_at=now)
+    return len(flagged), flagged
 
 
 class EscalationRoutingService:
@@ -1628,6 +1717,13 @@ class EscalationRoutingService:
                         "Escalation request_id was already used with different evidence",
                         code="idempotency_key_reused",
                     )
+                # PLAT-11158: a transition that successfully acts against an
+                # existing request_id IS the holder action — stamp the consume
+                # event on the receipt (first-stamp-wins; retries that fail
+                # before this point never stamp, replays after never re-stamp).
+                mark_receipt_consumed(
+                    request.receipt, transition_id=transition.id,
+                )
                 item._escalation_receipt_payload = _receipt_payload(
                     request.receipt, replayed=True,
                 )
