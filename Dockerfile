@@ -1,4 +1,6 @@
-FROM python:3.10-slim
+# PLAT-12493: pillow 13.0.0 (CVE-2026-112398) requires Python >=3.11.
+# Prod was resolving the 3.10 lock segment and staying on pillow 12.3.0.
+FROM python:3.12-slim
 COPY --from=ghcr.io/astral-sh/uv:0.11.26 /uv /uvx /bin/
 
 # Set environment variables
@@ -64,4 +66,4 @@ EXPOSE 8002 18002 18101
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["/usr/bin/supervisord", "-c", "/app/supervisord.conf"]
 
-# PLAT-10781: rebuild-trigger after python:3.10-slim base resnapshot (no behavioral change).
+# PLAT-12493: base is python:3.12-slim so the locked pillow 13.0.0 segment deploys.
