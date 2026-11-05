@@ -9,7 +9,7 @@
     "checker": "scripts/check-security-ci-contract.py",
     "parity_template": "security-ci/templates/security-ci-parity.yml",
     "workflow_sha256": "5f95a17a8c0e9de19e96f28cb22bfd8782c488ba7e2837c4d7d613dc86215c0a",
-    "normalizer_sha256": "a7955cb33ffed1644b6358111fdcee32589f07e20084bc94db12db1f879a894f",
+    "normalizer_sha256": "83ddaf9db8880b6a65af98e63253da23d2437d63fced511830eca04eb6dac440",
     "checker_sha256": "e037166913741ad81527eb8a4e7ba9a1d246afef6e4341d54d6f7f9213e93bd2",
     "parity_template_sha256": "8ab24dc5d6357b9168758dbca93a745a336f5d2535e7cb12ffd1849d2b6c91a5"
   },
@@ -20,7 +20,7 @@
       "project_id": 336,
       "schedule": "30 21 * * 3",
       "contract_version": 3,
-      "expected_bundle_sha256": "6b0ee7b888c51713f06f80938c453bb12ec1ccf3946e97026fd31d4dcc2f5c50"
+      "expected_bundle_sha256": "3da72c97cc3a3a8936c3be389a5c6e685c94e061a0b789cb8334475cf9e78133"
     },
     {
       "repo": "hive",
@@ -28,7 +28,7 @@
       "project_id": 332,
       "schedule": "30 21 * * 0",
       "contract_version": 3,
-      "expected_bundle_sha256": "d12ba12097e097447c264d066286072c365b07b92c46fe93f67e9a70f2d58c6c"
+      "expected_bundle_sha256": "c142cbb720eee07a61e81691ed5f295bb39a52e75fa08b3d20c63658d97e44f2"
     },
     {
       "repo": "wiki",
@@ -36,7 +36,7 @@
       "project_id": 350,
       "schedule": "30 21 * * 4",
       "contract_version": 3,
-      "expected_bundle_sha256": "a576eac25a65c25f3f65370984eaf6f61ded79814cc299aaa315c5c33a3a9db4"
+      "expected_bundle_sha256": "4b30f5e81d84dde26a5ce14bca158eae7c6f86aac5fbcb0c5a51c0b5f4fac5b1"
     },
     {
       "repo": "id",
@@ -44,7 +44,7 @@
       "project_id": 346,
       "schedule": "30 21 * * 2",
       "contract_version": 3,
-      "expected_bundle_sha256": "2e2aba089dad6b4abf75e16ebe69dd3414721441e3b9a3dba91023b149295184"
+      "expected_bundle_sha256": "284c0bedc1f725dddf3395a32d8c94e976345bf938b54d59196f6e1ea48db2bf"
     },
     {
       "repo": "drive",
@@ -52,7 +52,7 @@
       "project_id": 342,
       "schedule": "30 23 * * 3",
       "contract_version": 3,
-      "expected_bundle_sha256": "90d362b496d0c9cd5f95d665a268be6503cb29c635ed312a7d732c1deb06c0e7"
+      "expected_bundle_sha256": "bb572f99f6c3eb65756c408bcb2afb8e7303977ddbeacd041da781a7ca23bafb"
     },
     {
       "repo": "mail",
@@ -60,7 +60,7 @@
       "project_id": 347,
       "schedule": "30 19 * * 6",
       "contract_version": 3,
-      "expected_bundle_sha256": "3cbf40ecc3e7bb46ba2a2284e8b45c7dd4036cb210354b481a1984f399b0f440"
+      "expected_bundle_sha256": "ce8ae7ef931800f2474d2e35b0cb2f67f6b85bba9b13c863dca1c8143962fc8f"
     },
     {
       "repo": "notes",
@@ -68,7 +68,7 @@
       "project_id": 348,
       "schedule": "30 23 * * 5",
       "contract_version": 3,
-      "expected_bundle_sha256": "150037131ade86fa7a138a06776903ce8a4741a8ddae1e7496ea18714246277c"
+      "expected_bundle_sha256": "1e33cb34b1d171704caff913acfd2db93216c5eb5be572269ce6fbe569877694"
     },
     {
       "repo": "cortex",
@@ -76,7 +76,7 @@
       "project_id": 334,
       "schedule": "30 21 * * 1",
       "contract_version": 3,
-      "expected_bundle_sha256": "70a26a8366499543418d699a170040fc4e138c85db54f1bab0041e38c477e66f"
+      "expected_bundle_sha256": "35a8e3278f25de92530fcce3ae3efb923775dca959eea06c61b3463f2a40de67"
     },
     {
       "repo": "search",
@@ -84,7 +84,7 @@
       "project_id": 339,
       "schedule": "30 23 * * 4",
       "contract_version": 3,
-      "expected_bundle_sha256": "9b75c2a9923dfe236629d2a80454fc3574bd591c9e65be5e2cde8e37a142d887"
+      "expected_bundle_sha256": "a34c33baebdf95056be2e4c3394df9c257396f90466df68e9e1cebed4166728c"
     },
     {
       "repo": "books",
@@ -92,7 +92,7 @@
       "project_id": 340,
       "schedule": "30 19 * * 0",
       "contract_version": 3,
-      "expected_bundle_sha256": "0aeec4511bafd90caa475661e3e27674b57ac35f66a78cdb87779af97e35654a"
+      "expected_bundle_sha256": "503cb427b019304780529147681807f791ec4e041c11e346680d9929c37553e1"
     },
     {
       "repo": "finance",
@@ -100,7 +100,7 @@
       "project_id": 343,
       "schedule": "30 19 * * 1",
       "contract_version": 3,
-      "expected_bundle_sha256": "d04b454e33a2a0e659946603ed9631eeea1fdf56e2c4e5d8c46f44c5f98518f9"
+      "expected_bundle_sha256": "4177b2b346278883938a1101ca1d89eca73bee98cb64c89e86d9aabf61b2db46"
     },
     {
       "repo": "inventory",
@@ -108,7 +108,7 @@
       "project_id": 345,
       "schedule": "30 19 * * 4",
       "contract_version": 3,
-      "expected_bundle_sha256": "a98a8815eb6913f31b75b3dfbb7ab48f13d286554085f21e6485c266aa9bba4f"
+      "expected_bundle_sha256": "343f357778ae1d218a77c90c6f33d97b1a383016db0fa0afed8c8348c60d8c11"
     },
     {
       "repo": "dojo",
@@ -116,7 +116,7 @@
       "project_id": 359,
       "schedule": "30 19 * * 2",
       "contract_version": 3,
-      "expected_bundle_sha256": "aec39f4370b5d4cb05dddfbc299ff3fe6dce4637bffa3e5f771f9a662c390966"
+      "expected_bundle_sha256": "7da9790758ae2a1d9957f08b3e68c3361105083b961ed79e7fb84866b488d77a"
     },
     {
       "repo": "admin",
@@ -124,7 +124,7 @@
       "project_id": 331,
       "schedule": "30 23 * * 2",
       "contract_version": 3,
-      "expected_bundle_sha256": "6eb624b6f57351ab5ac79f8b967e0bb6a094193e7690d22c893594eab4a18771"
+      "expected_bundle_sha256": "030206b85cd2fe690fdb7779623e8fa304b6467e3e6ca529c8760e52d7297798"
     },
     {
       "repo": "home",
@@ -132,7 +132,7 @@
       "project_id": 331,
       "schedule": "30 23 * * 1",
       "contract_version": 3,
-      "expected_bundle_sha256": "38e4aa891f14dca647dbb8b370077577b3f88c03aa69f2384ffb8294b73ff7f7"
+      "expected_bundle_sha256": "2b7fd2d57d0fed5db6dfa0a4c4c2acee0f5b71d4d9080222d9df41a7172e97e0"
     },
     {
       "repo": "shizuha",
@@ -140,7 +140,7 @@
       "project_id": 333,
       "schedule": "30 21 * * 6",
       "contract_version": 3,
-      "expected_bundle_sha256": "83d40b1143a187825bdecd2b3bc1215a53a0616c5a7812d907c56c90878f94f0"
+      "expected_bundle_sha256": "fc1331b37ee82b031bdfed702952b216d7a478cd21e0f9f017d3fad748fd385e"
     },
     {
       "repo": "browser",
@@ -148,7 +148,7 @@
       "project_id": 341,
       "schedule": "30 17 * * 0",
       "contract_version": 3,
-      "expected_bundle_sha256": "a4bbd6b23241e1bbe085d9d76c14f6f9094afce6bac3b82d8fe51d92f43b800f"
+      "expected_bundle_sha256": "59104c790948d6d953fc3fd4622b984909f54634131e628e042bca7f451f7d9d"
     },
     {
       "repo": "forge",
@@ -156,7 +156,7 @@
       "project_id": 344,
       "schedule": "30 19 * * 3",
       "contract_version": 3,
-      "expected_bundle_sha256": "7421860fa35478fea442f682f58ef43bfcaa14b2d0e5066931ec0ae3dd056800"
+      "expected_bundle_sha256": "7aff385aa6296c52ea0e965547a82ddc771e54e254c5c2153a68b65b4818c07d"
     },
     {
       "repo": "kura-beta",
@@ -164,7 +164,7 @@
       "project_id": 338,
       "schedule": "30 23 * * 6",
       "contract_version": 3,
-      "expected_bundle_sha256": "b21981bf1b158cafc7d2069ae46811aab2cd88690907c9a557b917143bcefa0c"
+      "expected_bundle_sha256": "ae996348ee8709c8db17f6869a05a3162a71f0e4a681a64ea5fed7a3fcfe1390"
     },
     {
       "repo": "kotlin",
@@ -172,7 +172,7 @@
       "project_id": 337,
       "schedule": "30 19 * * 5",
       "contract_version": 3,
-      "expected_bundle_sha256": "c61def5651b5512e14f3c5d53749e8b5c98e1e8b26d97413902da864cef4ab55"
+      "expected_bundle_sha256": "5bcfc18523e86032ced708907144c59b72bac8cdbb31c395b3f65a9086b43ff6"
     },
     {
       "repo": "deploy",
@@ -180,7 +180,7 @@
       "project_id": 331,
       "schedule": "30 21 * * 5",
       "contract_version": 3,
-      "expected_bundle_sha256": "57bc6592a0268c03658ce51b7a93caf4a86e4370b893f5302db0c203707dd507"
+      "expected_bundle_sha256": "a61d736b9d85f35ea1516373b6a98cf0921326eb268e241925324750c273624a"
     },
     {
       "repo": "shizuha-tasks",
@@ -188,7 +188,7 @@
       "project_id": 335,
       "schedule": "30 23 * * 0",
       "contract_version": 3,
-      "expected_bundle_sha256": "f271adf901daa03b54734c158221cc8b0290e5b782631977deb462c9ce0c597a"
+      "expected_bundle_sha256": "3eaf14800903c3367e0df46b2889cc0951dc36a885d8da2dd90e0c48eb82984f"
     }
   ]
 }
