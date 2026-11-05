@@ -14064,6 +14064,25 @@ class WorkflowService:
                         # reservation) in this same batch.
                         if team_name != WorkflowService._recurring_owner_team(item):
                             _deliberate_team_route = True
+                        # PLS-776: decide whether this is a real exact-org
+                        # destination before mutating either half of the
+                        # ownership tuple.  A materialized routing binding is
+                        # authoritative even when it currently has no
+                        # admissible candidates; the legacy compatibility path
+                        # is authoritative only when the exact-org TeamRoster
+                        # row exists (``tiers=[]`` is a valid unstaffed lane,
+                        # while ``tiers=None`` means missing/foreign).
+                        from .routing_authority import (
+                            routing_candidate_snapshot_for_item,
+                        )
+                        _destination_snapshot = (
+                            routing_candidate_snapshot_for_item(team_name, item)
+                        )
+                        _destination_authority_valid = bool(
+                            _destination_snapshot.get('source')
+                            == 'routing_binding'
+                            or _destination_snapshot.get('tiers') is not None
+                        )
                         item.assignment_group = team_name
                         update_fields.append('assignment_group')
 
@@ -14205,39 +14224,40 @@ class WorkflowService:
                             # the group boundary.  That stale tuple is both
                             # dishonest and rejected by the exact-org Item.save
                             # guard (reviewer + merge group -> misleading same-org
-                            # 409).  Clear only on an actual lane crossing: a
-                            # same-team reassertion may legitimately retain its
-                            # active owner under PLS-204/no-steal semantics.
-                            _cross_team_handoff = bool(
-                                prior_team_name
-                                and prior_team_name != team_name
+                            # 409).  A same-team reassertion may retain its
+                            # active owner under PLS-204/no-steal only when that
+                            # owner is a member of the exact-org destination.
+                            # Missing/foreign destination authority deliberately
+                            # leaves the source tuple intact so the final guard
+                            # rejects the whole transition atomically.
+                            # Empty prior_group ('' != destination) counts as a
+                            # handoff, so the PLS-1080 governance-Approve shape is
+                            # covered without a separate ungated clear that would
+                            # also fire for missing/foreign destinations.
+                            _cross_team_handoff = (
+                                prior_team_name != team_name
                             )
-                            # PLS-1080 residual (PLAT-6012): a NON-handoff route
-                            # (prior group empty — e.g. a governance-assigned item
-                            # fired through an assign_team Approve) must still not
-                            # carry a concrete owner who is not a member of the
-                            # destination team roster. When the destination resolver
-                            # holds with no candidate (all seats at WIP cap / not
-                            # live), a stale non-roster assignee would otherwise
-                            # survive onto the destination group and be truthfully
-                            # rejected by the exact-org Item.save guard
-                            # (not-in-team), leaving the Approve one step from
-                            # broken. Clear it so the item is left group-queued on
-                            # the destination team. The org guard uses the same
-                            # membership check, so a False here is always a
-                            # guaranteed save-time rejection — clearing is the only
-                            # path that lets the route proceed.
-                            _stale_owner_not_in_destination = bool(
-                                (item.assignee_id or item.assignee_email)
-                                and not WorkflowService._is_team_member(
-                                    item.assignee_email or '',
+                            _current_owner_matches_destination = bool(
+                                item.assignee_email
+                                and WorkflowService._is_team_member(
+                                    item.assignee_email,
                                     team_name,
                                     item=item,
                                 )
                             )
-                            if (_cross_team_handoff or _stale_owner_not_in_destination) and (
-                                item.assignee_id or item.assignee_email
-                            ):
+                            # PLS-776 + PLS-1080 residual: clear only when the
+                            # destination is a real exact-org authority. A
+                            # missing/foreign destination must keep the source
+                            # tuple so final validation rejects atomically.
+                            _stale_destination_owner = bool(
+                                _destination_authority_valid
+                                and (item.assignee_id or item.assignee_email)
+                                and (
+                                    _cross_team_handoff
+                                    or not _current_owner_matches_destination
+                                )
+                            )
+                            if _stale_destination_owner:
                                 item.unassign(save=False, reason='no_candidate')
                                 for field in ('assignee_id', 'assignee_email'):
                                     if field not in update_fields:
