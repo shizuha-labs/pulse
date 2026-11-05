@@ -9238,6 +9238,13 @@ class EscalationRoutingReceipt(models.Model):
     reason_code = models.CharField(max_length=100)
     final_state = models.JSONField(default=dict)
     replayed_disposition = models.BooleanField(default=False)
+    # PLAT-11158 surface 2 (consume-anchored JIT TTL): first successful
+    # operator/holder action against the request_id stamps the consume event.
+    # consumed_at is first-stamp-wins; dormancy_flagged_at marks an
+    # unconsumed receipt past RECEIPT_DORMANCY_WINDOW for re-request.
+    consumed_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    consumed_by_transition_id = models.UUIDField(null=True, blank=True)
+    dormancy_flagged_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
