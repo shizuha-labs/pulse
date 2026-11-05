@@ -443,7 +443,36 @@ class ShizuhaJWTAuthentication(JWTAuthentication):
 
     If the user doesn't exist locally, creates a FederatedUser object
     from the token claims instead of failing with 401.
+
+    Browser login sets ``shizuha-access-token`` and does not send a Bearer
+    header. Accept that cookie when no Authorization header is present.
+    Unsafe methods still require a CSRF token so a cross-site form cannot
+    ride the cookie.
     """
+
+    def authenticate(self, request):
+        header = self.get_header(request)
+        if header is not None:
+            return super().authenticate(request)
+        raw = request.COOKIES.get(self._access_cookie_name())
+        if not raw:
+            return None
+        if request.method not in ('GET', 'HEAD', 'OPTIONS', 'TRACE'):
+            self.enforce_csrf(request)
+        raw_token = raw.encode('utf-8') if isinstance(raw, str) else raw
+        validated_token = self.get_validated_token(raw_token)
+        return self.get_user(validated_token), validated_token
+
+    def enforce_csrf(self, request):
+        from rest_framework.authentication import SessionAuthentication
+        SessionAuthentication().enforce_csrf(request)
+
+    @staticmethod
+    def _access_cookie_name():
+        from django.conf import settings
+        return (getattr(settings, 'REST_AUTH', None) or {}).get(
+            'JWT_AUTH_COOKIE', 'shizuha-access-token',
+        )
 
 
     def get_validated_token(self, raw_token):
