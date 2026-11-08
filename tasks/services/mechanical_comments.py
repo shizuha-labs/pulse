@@ -456,6 +456,33 @@ _SPECS = (
             f"Evidence: {p['evidence']}"
         ),
     ),
+    # PLAT-12781 option (a) slice (PLAT-12954): typed ingest receipt. Every
+    # staff-only DeploymentEvent ingest appends one platform-rendered line so
+    # the ledger thread carries closed provenance the PLS-675/PLAT-1351 v4 gate
+    # and human reviewers can audit. Ingestion itself is a staff authority —
+    # automation cannot mint qualifying rows, and free-form text is never authority.
+    MechanicalTemplate(
+        Comment.ORIGIN_WORKFLOW_LIFECYCLE, 'ledger.ingest_recorded', 1,
+        {
+            'item_key': str,
+            'deployment_event_id': str,
+            'repo': str,
+            'service': str,
+            'commit_sha': str,
+            'environment': str,
+            'ingested_by': str,
+        },
+        {'image_digest': str, 'image_tag': str},
+        lambda p: (
+            f"Typed ingest receipt: deploy_event={p['deployment_event_id']} "
+            f"repo={p['repo']} service={p['service']} "
+            f"sha={(p['commit_sha'] or '')[:12]} env={p['environment']} "
+            f"ingested_by={p['ingested_by']}"
+            + (f" image_digest={p['image_digest']}" if p.get('image_digest') else "")
+            + (f" image_tag={p['image_tag']}" if p.get('image_tag') else "")
+            + ". Platform-rendered; free-form text is not authority."
+        ),
+    ),
     # PLS-675 / Rei P1: immutable typed deploy-verify waiver receipt.
     MechanicalTemplate(
         Comment.ORIGIN_WORKFLOW_LIFECYCLE, 'receipt.deploy_verify_waiver', 1,

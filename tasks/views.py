@@ -1508,16 +1508,64 @@ class DeploymentEventViewSet(viewsets.ModelViewSet):
             return qs[:limit]
         return qs
 
+    # PLAT-12781 option (a) slice (PLAT-12954): DeploymentEvent ingestion is
+    # staff-only. Automation cannot mint ledger rows by calling this API; the
+    # provenance-verified path is a staff/operator authority. Each first-time
+    # ingest appends one platform-rendered receipt so the ledger thread carries
+    # closed provenance the gate can correlate — free-form text is never authority.
     def _ingest(self, request):
+        if not (request.user.is_staff or request.user.is_superuser):
+            raise PermissionDenied('DeploymentEvent ingestion is staff-only.')
         serializer = DeploymentEventIngestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         from .services.deployment_events import upsert_deployment_event
         event, created, devops_task = upsert_deployment_event(serializer.validated_data)
+        if created:
+            self._record_ingest_receipt(request, event)
         response = DeploymentEventSerializer(event, context={'request': request}).data
         response['created'] = created
         response['devops_task_key'] = getattr(devops_task, 'item_key', None) if devops_task else None
         response['devops_task_id'] = getattr(devops_task, 'id', None) if devops_task else None
         return Response(response, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+    @staticmethod
+    def _record_ingest_receipt(request, event):
+        """Append the typed ingest receipt to the related Pulse thread."""
+        target = event.qa_task or event.failure_task
+        if target is None:
+            # Ledger-only events with no determinable thread stay ledger-only.
+            return
+        from .services.mechanical_comments import (
+            MechanicalCommentFactory,
+            deterministic_event_id,
+        )
+        payload = {
+            'item_key': getattr(target, 'item_key', '') or '',
+            'deployment_event_id': str(event.id),
+            'repo': event.repo,
+            'service': event.service,
+            'commit_sha': event.commit_sha,
+            'environment': event.environment,
+            'ingested_by': (
+                getattr(request.user, 'email', '')
+                or str(getattr(request.user, 'id', '') or '')
+            ),
+        }
+        if event.image_digest:
+            payload['image_digest'] = event.image_digest
+        if event.image_tag:
+            payload['image_tag'] = event.image_tag
+        MechanicalCommentFactory.create(
+            item=target,
+            origin_kind='WORKFLOW_LIFECYCLE',
+            origin_event='ledger.ingest_recorded',
+            template_version=1,
+            structured_payload=payload,
+            origin_event_id=deterministic_event_id(
+                'ledger.ingest_recorded', target, str(event.id),
+            ),
+            causal_actor=request.user,
+        )
 
     def create(self, request, *args, **kwargs):
         return self._ingest(request)
