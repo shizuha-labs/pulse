@@ -20,6 +20,7 @@ instead of retaining an unauthorized concrete owner.
 """
 import os
 import threading
+import time
 from datetime import timedelta
 from unittest import mock
 
@@ -1431,7 +1432,9 @@ class OperatorWaitReconciliationConcurrencyTests(TransactionTestCase):
         def worker(source):
             close_old_connections()
             try:
-                barrier.wait(timeout=5)
+                # Generous barrier window: on a loaded runner the sweep
+                # worker can take several seconds just to be scheduled.
+                barrier.wait(timeout=30)
                 if source == 'signal':
                     comment = Comment.objects.get(pk=self.ack.pk)
                     result = handle_digest_comment_saved(comment)
@@ -1470,10 +1473,21 @@ class OperatorWaitReconciliationConcurrencyTests(TransactionTestCase):
             ]
             for thread in threads:
                 thread.start()
+            # Shared deadline instead of a fixed per-thread join timeout:
+            # the eager sweep does real DB work and, mid-suite on a loaded
+            # ARM64 runner, can legitimately exceed 15s. Join sequentially
+            # against one generous deadline so the liveness assert below
+            # measures an actual hang, not scheduler latency (run 9647
+            # flake: thread alive at the 15s mark with everything healthy).
+            join_deadline = time.monotonic() + 120
             for thread in threads:
-                thread.join(timeout=15)
+                thread.join(timeout=max(1.0, join_deadline - time.monotonic()))
 
-        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertFalse(
+            any(thread.is_alive() for thread in threads),
+            'worker threads still alive after the 120s join deadline — '
+            'signal/sweep workers hung, not merely slow',
+        )
         self.assertEqual(errors, [])
         self.assertEqual(len(results), 2)
         self.assertEqual(OperatorWaitDigestState.objects.count(), 1)

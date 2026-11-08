@@ -4822,6 +4822,43 @@ class ItemViewSet(viewsets.ModelViewSet):
             'acceptance_mode': item.acceptance_mode,
         }, status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=['post'], url_path='reclassify-acceptance-mode')
+    def reclassify_acceptance_mode(self, request, pk=None):
+        """PLAT-9355 — role-gated acceptance_mode reclassification.
+
+        Distinct from PLAT-9427 ``reclassify-acceptance`` (record-class,
+        assignee/creator, live→code only). This path is devops/admin-ops or
+        operator, any typed mode, mandatory reason.
+        """
+        from .services.workflow_service import (
+            WorkflowService,
+            WorkflowValidationError,
+        )
+        item = self.get_object()
+        new_mode = (request.data.get('acceptance_mode') or '').strip()
+        reason = (request.data.get('reason') or '').strip()
+        if new_mode.lower() not in WorkflowService._ACCEPTANCE_MODES_ALL:
+            return Response(
+                {'error': 'invalid_acceptance_mode',
+                 'detail': f'acceptance_mode must be one of '
+                           f'{sorted(WorkflowService._ACCEPTANCE_MODES_ALL)}'},
+                status=status.HTTP_400_BAD_REQUEST)
+        if not reason:
+            return Response(
+                {'error': 'missing_reason',
+                 'detail': 'a non-empty reason is required for the audit trail'},
+                status=status.HTTP_400_BAD_REQUEST)
+        try:
+            item = WorkflowService.reclassify_governed_acceptance_mode(
+                item, actor=request.user, new_mode=new_mode, reason=reason,
+            )
+        except WorkflowValidationError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        return Response({
+            'item_key': getattr(item, 'item_key', None) or str(item.pk),
+            'acceptance_mode': item.acceptance_mode,
+        }, status=status.HTTP_200_OK)
+
     @action(detail=True, methods=['get'], url_path='focused-qa-verify')
     def focused_qa_verify(self, request, pk=None):
         """PLS-695 — run the Focused-QA verifier over an item (read-only).

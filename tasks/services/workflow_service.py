@@ -4032,6 +4032,28 @@ class WorkflowService:
         return tokens
 
     @staticmethod
+    def _is_simple_ops_workflow(item):
+        """True when the item runs on the system simple (ops/no-PR) workflow.
+
+        PLAT-9355: identity is the system workflow slug (simple + is_system)
+        so the exemption cannot leak onto a custom workflow that merely
+        resembles it.
+        """
+        wf_name = (getattr(item, 'workflow_name', None) or '').strip()
+        if not wf_name:
+            return False
+        try:
+            from ..models import Workflow
+            wf = Workflow.resolve(wf_name)
+        except Exception:
+            return False
+        return bool(
+            wf is not None
+            and (getattr(wf, 'slug', '') or '') == 'simple'
+            and getattr(wf, 'is_system', False)
+        )
+
+    @staticmethod
     def _package_publish_without_deploy_surface(item):
         """True for package-publish artifacts with no deploy surface of their own.
 
@@ -4272,6 +4294,12 @@ class WorkflowService:
             if (origin is not None and
                     WorkflowService._focused_qa_origin_non_deployable(origin)):
                 return WorkflowService._ACCEPTANCE_MODE_CODE
+        # PLAT-9355: system simple (ops/no-PR) workflow has no merge lane.
+        # Deploy evidence is structurally unsatisfiable, including rows whose
+        # field was persisted live — this arm sits before the raw-field
+        # short-circuit so those rows are reachable.
+        if WorkflowService._is_simple_ops_workflow(item):
+            return WorkflowService._ACCEPTANCE_MODE_CODE
         raw = (getattr(item, 'acceptance_mode', None) or '').strip().lower()
         if raw in WorkflowService._ACCEPTANCE_MODES_ALL:
             return raw
@@ -6646,6 +6674,82 @@ class WorkflowService:
         except MechanicalCommentError as exc:
             raise WorkflowValidationError(str(exc)) from exc
 
+    # PLAT-9355: authorized acceptance-mode reclassification teams.
+    _RECLASSIFY_TEAMS = ('devops', 'admin-ops')
+
+    @staticmethod
+    def reclassify_governed_acceptance_mode(item, *, actor, new_mode, reason=''):
+        """Role-gated acceptance_mode reclassification (PLAT-9355).
+
+        ``acceptance_mode`` is read-only on the item serializer (PLS-1249):
+        it is set at create or through THIS path — the authorized
+        reclassification path the serializer's 400 message names. ``actor``
+        must be a member of devops/admin-ops at call time (operator
+        authority accepted). The new mode is validated against the typed
+        enum, persisted onto the field, and the change is recorded as a
+        mechanical comment (actor + team + from/to + reason) so every mode
+        change is auditable. Returns the updated item.
+        """
+        from datetime import datetime, timezone
+        from .mechanical_comments import MechanicalCommentFactory, MechanicalCommentError
+        mode = (new_mode or '').strip().lower()
+        if mode not in WorkflowService._ACCEPTANCE_MODES_ALL:
+            raise WorkflowValidationError(
+                f'unknown acceptance_mode {mode!r}; expected one of '
+                f'{sorted(WorkflowService._ACCEPTANCE_MODES_ALL)}')
+        reason = (reason or '').strip()
+        if not reason:
+            raise WorkflowValidationError(
+                'acceptance-mode reclassification requires a non-empty reason')
+        email = (getattr(actor, 'email', None) or '').strip()
+        if not email:
+            raise WorkflowValidationError(
+                'acceptance-mode reclassification requires an authenticated actor email')
+        if WorkflowService._is_deploy_verify_automation_email(email):
+            raise WorkflowValidationError(
+                'automation cannot reclassify acceptance_mode')
+        team = None
+        for t in WorkflowService._RECLASSIFY_TEAMS:
+            if WorkflowService._is_team_member(email, t, item=item):
+                team = t
+                break
+        if not team and WorkflowService._is_operator_email(email):
+            team = 'operator'
+        if not team:
+            raise WorkflowValidationError(
+                'acceptance-mode reclassification requires devops/admin-ops '
+                'membership or operator authority')
+        previous = (getattr(item, 'acceptance_mode', None) or '').strip().lower()
+        item.acceptance_mode = mode
+        item.save(update_fields=['acceptance_mode', 'updated_at'])
+        key = getattr(item, 'item_key', '') or str(item.pk)
+        eid = (
+            f'acceptance-reclass:{key}:{email}:'
+            f'{datetime.now(timezone.utc).isoformat()}'
+        ).strip()
+        try:
+            MechanicalCommentFactory.create(
+                item=item,
+                origin_kind='WORKFLOW_LIFECYCLE',
+                origin_event='receipt.acceptance_mode_reclassification',
+                template_version=2,
+                structured_payload={
+                    'item_key': key,
+                    'result': 'reclassified',
+                    'actor_email': email,
+                    'from_mode': previous,
+                    'to_mode': mode,
+                    'reason': reason,
+                    'issued_at': datetime.now(timezone.utc).isoformat(),
+                    'contract': f'PLAT-9355 governed reclassification ({team})',
+                },
+                origin_event_id=eid,
+                causal_actor=actor,
+            )
+        except MechanicalCommentError as exc:
+            raise WorkflowValidationError(str(exc)) from exc
+        return item
+
     @staticmethod
     def _collect_deploy_verify_missing(item, mode, *, evidence_path=None):
         """Return ordered list of named missing-evidence classes for ``mode``."""
@@ -6668,6 +6772,12 @@ class WorkflowService:
         # create-time default was corrected. The explicit marker prevents
         # over-exemption of deploy-governed work.
         if WorkflowService._package_publish_without_deploy_surface(item):
+            return missing
+
+        # PLAT-9355: system simple (ops/no-PR) workflow. No merge lane, so
+        # deploy evidence classes are structurally unsatisfiable. Identity is
+        # the system workflow slug, so this cannot exempt a PR-driven workflow.
+        if WorkflowService._is_simple_ops_workflow(item):
             return missing
 
         # PLAT-7600: focused-QA legs. (a) A leg whose verification target is
