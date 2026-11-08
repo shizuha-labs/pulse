@@ -808,6 +808,12 @@ jobs:
           # in exactly this gap: script tracked in the git tree, absent on
           # disk → "No such file or directory" → no DeploymentEvent.
           install -m 0755 "${SRC_DIR}/.forgejo/scripts/record-deployment-event.sh" .forgejo/scripts/record-deployment-event.sh
+          # PLS-1346: the recorder resolves image_digest by piping pod JSON to
+          # select_pod_image_digest.py beside itself ($SCRIPT_DIR). That helper
+          # is tracked in git but was never materialized here, so every pulse
+          # DeploymentEvent degraded to image_digest="". Same class as the
+          # recorder install above.
+          install -m 0644 "${SRC_DIR}/.forgejo/scripts/select_pod_image_digest.py" .forgejo/scripts/select_pod_image_digest.py
           install -m 0644 "${SRC_DIR}/.forgejo/workflows/deploy.yml" .forgejo/workflows/deploy.yml
           install -m 0644 "${SRC_DIR}/.forgejo/workflows/deploy-frontend.yml" .forgejo/workflows/deploy-frontend.yml
           python3 .forgejo/scripts/test_deploy_values_path.py

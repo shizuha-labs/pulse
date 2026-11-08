@@ -153,7 +153,7 @@ class Pls525EscalationHoldBlockerTests(TransactionTestCase):
         blocker = self._assert_one_owned_blocker(result, team="engineering")
         self.assertEqual(blocker.metadata["auto_blocker_for"], self.item.item_key)
         disposition = EscalationRoutingDisposition.objects.get(item=self.item)
-        self.assertEqual(disposition.classification, "mixed_or_unknown_escalation_hold")
+        self.assertEqual(disposition.classification, "schema_repair_hold")
         self.assertEqual(disposition.reason_code, "missing_evidence_schema")
 
     def test_valid_non_allowlisted_captured_team_is_preserved(self):
@@ -260,7 +260,7 @@ class Pls525EscalationHoldBlockerTests(TransactionTestCase):
 
         self._assert_one_owned_blocker(result, team="engineering")
         disposition = EscalationRoutingDisposition.objects.get(item=self.item)
-        self.assertEqual(disposition.classification, "mixed_or_unknown_escalation_hold")
+        self.assertEqual(disposition.classification, "schema_repair_hold")
         self.assertEqual(disposition.reason_code, "unexpected_error")
 
     def test_injected_link_failure_rolls_back_child_link_parent_and_receipt(self):

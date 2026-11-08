@@ -364,6 +364,34 @@ class Pls835FocusAndCommandTests(TestCase):
         classes = {a.get('authority_class') for a in payload['ambiguity_rows']}
         self.assertIn('instrument_contradiction', classes)
 
+    def test_schema_repair_hold_is_not_an_instrument_contradiction(self):
+        """PLS-1370: owned schema-repair holds must not fail the census."""
+        project = _mk_project()
+        parent = _mk_item(project, 'C835-SP', 'blocked')
+        child = _mk_item(project, 'C835-SC', 'todo', tags='PLAT-4215')
+        ItemLink.objects.create(
+            source_item=child, target_item=parent, link_type='blocks',
+            created_by_id=0, created_by_email='kumo@shizuha.com',
+        )
+        disp = _mk_disposition(project, parent, child, generation=1)
+        disp.classification = 'schema_repair_hold'
+        disp.outcome = 'held'
+        disp.reason_code = 'missing_evidence_schema'
+        disp.normalized_evidence = {}
+        disp.save(update_fields=[
+            'classification', 'outcome', 'reason_code', 'normalized_evidence',
+        ])
+
+        buf = io.StringIO()
+        call_command('census_pls835_waiting_external', format='json', stdout=buf)
+        payload = json.loads(buf.getvalue())
+        classes = {a.get('authority_class') for a in payload['ambiguity_rows']}
+        self.assertNotIn('instrument_contradiction', classes)
+        by_key = {r['child_key']: r for r in payload['rows']}
+        reasons = by_key['C835-SC']['ineligible_reasons']
+        self.assertFalse(any(r.startswith('classification=') for r in reasons))
+        self.assertNotIn('missing_dependency', reasons)
+
     def test_parent_unblocked_with_live_link_fail_closed(self):
         """rui P2: non-terminal parent not blocked + live blocks link → invalid."""
         project = _mk_project()

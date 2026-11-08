@@ -2349,7 +2349,7 @@ class TypedEscalationRoutingTests(TestCase):
         self.assertEqual(result.assignee_email, self.user.email)
         self.assertTrue(WorkflowService._has_active_assigned_blocker(result))
         disposition = EscalationRoutingDisposition.objects.get(item=result)
-        self.assertEqual(disposition.classification, 'mixed_or_unknown_escalation_hold')
+        self.assertEqual(disposition.classification, 'schema_repair_hold')
         self.assertEqual(disposition.reason_code, 'missing_evidence_schema')
         self.assertIsNotNone(disposition.child_item_id)
         self.assertEqual(
@@ -2763,7 +2763,7 @@ class TypedEscalationRoutingTests(TestCase):
         self.assertEqual(Item.objects.filter(parent_item=item).count(), 0)
         self.assertTrue(WorkflowService._has_active_assigned_blocker(result))
         disposition = EscalationRoutingDisposition.objects.get(item=item)
-        self.assertEqual(disposition.classification, 'mixed_or_unknown_escalation_hold')
+        self.assertEqual(disposition.classification, 'schema_repair_hold')
         self.assertEqual(disposition.reason_code, 'unexpected_error')
 
 class WorkflowStaleTimerTests(TestCase):

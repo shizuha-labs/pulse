@@ -1323,6 +1323,21 @@ class OperatorWaitReconciliationConcurrencyTests(TransactionTestCase):
     reset_sequences = True
 
     def setUp(self):
+        # PLS-1164 hermetic containment, scoped to THIS class only (sara,
+        # PLS-1370 follow-up to c0a95200): only the thread-based tests here
+        # can stall past their 15s join on the hermetic blackhole-port retry
+        # window (run 9814 proved the module-wide stub over-reaches — see
+        # below). RosterOwnerReconciliationTests must keep live resolution:
+        # its failover test (test_accounting_failover_stays_inside_task_
+        # organization:420) asserts the personal-accounting backup resolves,
+        # and stubbing the raw lookup to None classifies mina@shizuha.com as
+        # phantom, leaving the assignee None (run 9814's only failure).
+        _lookup_patcher = mock.patch(
+            'tasks.services.canonical_identity._raw_principal_lookup',
+            return_value=None,
+        )
+        _lookup_patcher.start()
+        self.addCleanup(_lookup_patcher.stop)
         self.project = Project.objects.create(
             name='Operator wait concurrency', key='OWC', org_id=1,
             access_level='open',

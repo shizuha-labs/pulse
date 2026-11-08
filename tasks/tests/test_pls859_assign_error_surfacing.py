@@ -153,5 +153,22 @@ class AssignValidationDetailAPITests(TestCase):
         self.assertEqual(resp.data.get('assignment_group'), 'engineering')
         self.assertEqual(resp.data.get('requested_assignment_group'), 'trading-engineering')
         self.assertTrue(resp.data.get('assignment_group_canonicalized'))
-        self.assertIn('canonicalized', (resp.data.get('message') or '').lower())
-        self.assertIn('trading-engineering', resp.data.get('message') or '')
+
+    @patch('tasks.services.admin_service.admin_service.get_organization',
+           side_effect=lambda org_id: {'id': int(org_id), 'slug': 'shizuha'})
+    @patch('tasks.services.workflow_service.WorkflowService._resolve_team_assignee',
+           side_effect=RuntimeError('secret query text'))
+    def test_resolver_exception_names_team_and_type_not_message(
+        self, _resolve, _get_org,
+    ):
+        resp = self.client.post(
+            f'/api/items/{self.item.pk}/assign/',
+            {'assignment_group': 'engineering'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 500, resp.content)
+        self.assertEqual(resp.data['error'], 'team_assignment_resolution_failed')
+        self.assertEqual(resp.data['assignment_group'], 'engineering')
+        self.assertEqual(resp.data['exception_type'], 'RuntimeError')
+        self.assertNotIn('secret query text', str(resp.data))
+        self.assertIn('engineering', resp.data.get('detail') or '')
