@@ -3802,6 +3802,20 @@ class Comment(models.Model):
         return f"Comment by {self.author_email} on Item #{self.item_id}"
 
     def save(self, *args, **kwargs):
+        # PLS-1338: write-time classification. Automation authors
+        # (system@pulse, workflow@pulse — the failover/rebalance/queue-hygiene
+        # lifecycle churn writers) default to WORKFLOW_LIFECYCLE unless the
+        # caller types an explicit origin_kind; the LEGACY_UNTYPED default is
+        # for genuinely old substantive rows, and the digest partitioning
+        # consumes is_system (= not USER_AUTHORED and not LEGACY_UNTYPED), so
+        # an untyped automation write silently rendered as substantive content
+        # and starved the digest (0/187 flagged on PLAT-528, 0/94 on SCLI-731).
+        if (
+            not self.pk
+            and self.origin_kind == self.ORIGIN_LEGACY_UNTYPED
+            and (self.author_email or '').strip().lower().endswith('@pulse')
+        ):
+            self.origin_kind = self.ORIGIN_WORKFLOW_LIFECYCLE
         # Mechanical bodies and provenance are immutable after insertion.  A
         # repair may use one audited, exact-row QuerySet.update command; ordinary
         # model/API edits must never restamp or rewrite a workflow audit.

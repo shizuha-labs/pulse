@@ -412,7 +412,7 @@ def _plan_for(item: Item, transition, prepared: _PreparedEvidence, screen_data: 
             else "admin-ops"
         )
         return _Plan(
-            "mixed_or_unknown_escalation_hold", "held",
+            "schema_repair_hold", "held",
             prepared.validation_reason, "blocked", hold_group,
         )
 
@@ -467,7 +467,7 @@ def _plan_for(item: Item, transition, prepared: _PreparedEvidence, screen_data: 
             WorkflowService._ready_status_for_item(item), team, team, generation,
         )
     return _Plan(
-        "mixed_or_unknown_escalation_hold", "held", "classification_unknown",
+        "schema_repair_hold", "held", "classification_unknown",
         "blocked", item.assignment_group or "admin-ops",
     )
 
@@ -524,7 +524,7 @@ def _restore_pre_state(item: Item, pre: dict) -> None:
 def _canonicalize_hold_plan(item: Item, plan: _Plan) -> _Plan:
     """Resolve one exact-org owner for both sides of a fail-loud HOLD."""
     if (
-        plan.classification != "mixed_or_unknown_escalation_hold"
+        plan.classification != "schema_repair_hold"
         or plan.target_status != "blocked"
     ):
         return plan
@@ -966,7 +966,7 @@ def _prepare_required_blocker(
         allow_team_leaf_suppression = (
             prepared is None
             or prepared.validation_reason
-            or plan.classification == "mixed_or_unknown_escalation_hold"
+            or plan.classification == "schema_repair_hold"
         )
         team_leaf = next(
             (blocker for blocker in active_linked
@@ -1254,7 +1254,7 @@ def _apply_parent_plan(item: Item, plan: _Plan, *, pre: dict, actor) -> None:
 
     if plan.classification == "operator_request_hygiene_reject":
         _restore_pre_state(item, pre)
-    elif plan.classification == "mixed_or_unknown_escalation_hold":
+    elif plan.classification == "schema_repair_hold":
         _restore_pre_state(item, pre)
         item.status = "blocked"
         item.workflow_status = WorkflowService._workflow_status_display_for_item(item, "blocked")
@@ -1830,7 +1830,7 @@ class EscalationRoutingService:
                     "operator_dependency_",
                 )
                 plan = _Plan(
-                    "mixed_or_unknown_escalation_hold", "held", exc.reason_code,
+                    "schema_repair_hold", "held", exc.reason_code,
                     "blocked", (
                         pre.get("assignment_group")
                         if pre.get("assignment_group") and pre.get("assignee_id") and pre.get("assignee_email")
@@ -2074,7 +2074,7 @@ class EscalationRoutingService:
                     )
                     item.refresh_from_db()
                 plan = _Plan(
-                    "mixed_or_unknown_escalation_hold", "held", reason_code,
+                    "schema_repair_hold", "held", reason_code,
                     (
                         item.status
                         if parked is not None
@@ -2086,7 +2086,7 @@ class EscalationRoutingService:
                 blocker_child = None
             else:
                 plan = _Plan(
-                    "mixed_or_unknown_escalation_hold", "held", reason_code,
+                    "schema_repair_hold", "held", reason_code,
                     "blocked", (
                         pre.get("assignment_group")
                         if pre.get("assignment_group") and pre.get("assignee_id") and pre.get("assignee_email")

@@ -6264,7 +6264,10 @@ class ItemViewSet(viewsets.ModelViewSet):
                             })
                 except RoutingAuthorityError as e:
                     return routing_error_response(e)
-                except Exception:
+                except Exception as exc:
+                    # PLAT-10356: the 500 must name the team and the exception
+                    # class. Do not echo str(exc); resolver failures can carry
+                    # query text. The stack stays in the server log.
                     logger.exception(
                         "Could not resolve assignment_group=%r for item %s",
                         team_name, item.id,
@@ -6272,6 +6275,12 @@ class ItemViewSet(viewsets.ModelViewSet):
                     return Response({
                         'error': 'team_assignment_resolution_failed',
                         'assignment_group': team_name,
+                        'exception_type': type(exc).__name__,
+                        'detail': (
+                            f"Could not resolve assignment_group {team_name!r} "
+                            f"({type(exc).__name__}). Retry if transient; "
+                            "the stack is in the Pulse server log."
+                        ),
                     }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
                 if not email:
                     finding = WorkflowService._maybe_file_zero_member_team_alert(

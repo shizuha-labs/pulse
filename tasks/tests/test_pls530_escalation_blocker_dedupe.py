@@ -453,7 +453,7 @@ class Pls530EscalationBlockerDedupeTests(TransactionTestCase):
         # instead of returning "" and bypassing the mint/reuse gate.
         parent = self._parent("FORCED-10")
         plan = _Plan(
-            classification="mixed_or_unknown_escalation_hold",
+            classification="schema_repair_hold",
             outcome="held",
             reason_code="forced_hold_recovery",
             target_status="blocked",
@@ -509,7 +509,7 @@ class Pls530EscalationBlockerDedupeTests(TransactionTestCase):
             if (
                 item.pk in parent_ids
                 and item.pk not in failed_parents
-                and plan.classification != "mixed_or_unknown_escalation_hold"
+                and plan.classification != "schema_repair_hold"
             ):
                 failed_parents.add(item.pk)
                 raise escalation_routing._PlanFailure("injected_shared_rollback")
@@ -714,7 +714,7 @@ class Pls530EscalationBlockerDedupeTests(TransactionTestCase):
         dependency.refresh_from_db()
         canonical = Item.objects.get(pk=canonical_id)
         disposition = EscalationRoutingDisposition.objects.get(item=result)
-        self.assertEqual(disposition.classification, "mixed_or_unknown_escalation_hold")
+        self.assertEqual(disposition.classification, "schema_repair_hold")
         self.assertEqual(disposition.outcome, "held")
         self.assertEqual(
             disposition.reason_code,
@@ -756,7 +756,7 @@ class Pls530EscalationBlockerDedupeTests(TransactionTestCase):
         dependency.refresh_from_db()
         canonical.refresh_from_db()
         disposition = EscalationRoutingDisposition.objects.get(item=result)
-        self.assertEqual(disposition.classification, "mixed_or_unknown_escalation_hold")
+        self.assertEqual(disposition.classification, "schema_repair_hold")
         self.assertEqual(disposition.outcome, "held")
         self.assertEqual(
             disposition.reason_code,

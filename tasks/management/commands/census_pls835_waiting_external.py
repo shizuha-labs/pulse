@@ -530,13 +530,25 @@ class Command(BaseCommand):
             reasons.append(f'mode={child.mode!r}')
         if not str(child.assignee_email or '').strip():
             reasons.append('missing_assignee_email')
-        if disp.classification != 'operator_held_dependency':
-            reasons.append(f'classification={disp.classification!r}')
-        if disp.outcome != 'routed':
-            reasons.append(f'outcome={disp.outcome!r}')
+        # PLS-1370: a schema-repair hold is an owned fail-closed instrument
+        # (reason_code carries the defect). It is not an operator-held
+        # dependency and must not invalidate the census as a contradiction.
+        # Every other non-canonical class still does.
+        if not (
+            disp.classification == 'schema_repair_hold'
+            and disp.outcome == 'held'
+        ):
+            if disp.classification != 'operator_held_dependency':
+                reasons.append(f'classification={disp.classification!r}')
+            if disp.outcome != 'routed':
+                reasons.append(f'outcome={disp.outcome!r}')
 
+        schema_repair = (
+            disp.classification == 'schema_repair_hold'
+            and disp.outcome == 'held'
+        )
         ok, limb = _limb_verdict(disp.normalized_evidence or {})
-        if not ok:
+        if not ok and not schema_repair:
             reasons.append(limb)
 
         tags = {

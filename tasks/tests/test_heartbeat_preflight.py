@@ -263,7 +263,7 @@ class HeartbeatPreflightTests(APITestCase):
             generation=generation,
             disposition_digest=f'{reason}-{generation}'.ljust(64, '0')[:64],
             schema_version='shizuha.pulse.escalation-evidence.v1',
-            classification='mixed_or_unknown_escalation_hold',
+            classification='schema_repair_hold',
             outcome='held',
             reason_code=reason,
         )
