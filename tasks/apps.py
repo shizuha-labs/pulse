@@ -105,3 +105,12 @@ class TasksConfig(AppConfig):
                 import logging
                 logger = logging.getLogger(__name__)
                 logger.warning(f"Could not setup recurring-cycle lane watchdog schedule: {e}")
+
+            # PLAT-11174: teamless-item reconcile (15-past beat)
+            try:
+                from tasks.teamless_reconcile import setup_teamless_reconcile_schedule
+                setup_teamless_reconcile_schedule()
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Could not setup teamless reconcile schedule: {e}")
