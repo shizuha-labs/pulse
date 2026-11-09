@@ -3829,16 +3829,43 @@ class Comment(models.Model):
         # window. The caller receives the existing row instead of a new one, so
         # return values stay usable and no post_save fan-out (activity, task
         # event, notifications, outbox) is produced for the repeat.
+        #
+        # PLS-1478: the plain check-then-insert raced — two concurrent sweep
+        # workers both passed the "no recent identical body" check and
+        # double-inserted (live: PLAT-13188 cmts 1236492/1236493 at 0s gap,
+        # PLAT-12456 1236494/1236495/1236496). Eligible rows therefore take a
+        # serialized path: transaction-scoped pg_advisory_xact_lock keyed on
+        # (item, author, body hash), re-check under the lock, then insert
+        # inside the same transaction. The lock releases at commit, so the
+        # second worker's re-check always sees the first worker's row. The
+        # 4h window and the state-marker/parent/exemption carve-outs are
+        # unchanged (enforced inside admit_automation_comment).
         if (
             not self.pk
             and not kwargs.get('force_update')
             and not kwargs.get('update_fields')
         ):
-            from .services.comment_admission import admit_automation_comment
-            duplicate = admit_automation_comment(self)
+            from django.db import transaction
+
+            from .services import comment_admission
+            duplicate = comment_admission.admit_automation_comment(self)
             if duplicate is not None:
                 self._adopt_existing_comment(duplicate)
                 return
+            if comment_admission.automation_dedupe_serialization_eligible(self):
+                with transaction.atomic():
+                    comment_admission.acquire_automation_admission_lock(self)
+                    # Re-check only the duplicate lookup here — the clamp
+                    # already ran once in the fast path above, and re-running
+                    # the full admission would clamp the already-truncated
+                    # body a second time (restamp "truncated N characters"
+                    # with the note's own length). PLS-1478 follow-up.
+                    duplicate = comment_admission.find_recent_automation_duplicate(self)
+                    if duplicate is not None:
+                        self._adopt_existing_comment(duplicate)
+                        return
+                    super().save(*args, **kwargs)
+                    return
         # Mechanical bodies and provenance are immutable after insertion.  A
         # repair may use one audited, exact-row QuerySet.update command; ordinary
         # model/API edits must never restamp or rewrite a workflow audit.
