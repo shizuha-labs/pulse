@@ -22022,6 +22022,11 @@ class WorkflowService:
                 status__in=role_excluded,
                 assignment_group__iexact=team,
             )
+        # PLS-1456: a devops-owned deploy/CI item must not consume an
+        # engineering capacity slot even when an engineering seat is the
+        # assignee. Engineering can still move its own items.
+        if team == 'engineering':
+            qs = qs.exclude(assignment_group__iexact='devops')
         if getattr(item, 'pk', None):
             qs = qs.exclude(pk=item.pk)
         return exclude_operator_wait_items(qs)
