@@ -3801,6 +3801,14 @@ class Comment(models.Model):
     def __str__(self):
         return f"Comment by {self.author_email} on Item #{self.item_id}"
 
+    def _adopt_existing_comment(self, existing):
+        """Turn this unsaved instance into a handle on ``existing`` (no insert)."""
+        for field in self._meta.concrete_fields:
+            setattr(self, field.attname, getattr(existing, field.attname))
+        self._state.adding = False
+        self._state.db = existing._state.db
+        self.comment_admission_suppressed = True
+
     def save(self, *args, **kwargs):
         # PLS-1338: write-time classification. Automation authors
         # (system@pulse, workflow@pulse — the failover/rebalance/queue-hygiene
@@ -3816,6 +3824,21 @@ class Comment(models.Model):
             and (self.author_email or '').strip().lower().endswith('@pulse')
         ):
             self.origin_kind = self.ORIGIN_WORKFLOW_LIFECYCLE
+        # Comment-noise guardrail (2026-11-09 audit): automation authors may
+        # not append a byte-identical body to the same item inside the dedupe
+        # window. The caller receives the existing row instead of a new one, so
+        # return values stay usable and no post_save fan-out (activity, task
+        # event, notifications, outbox) is produced for the repeat.
+        if (
+            not self.pk
+            and not kwargs.get('force_update')
+            and not kwargs.get('update_fields')
+        ):
+            from .services.comment_admission import admit_automation_comment
+            duplicate = admit_automation_comment(self)
+            if duplicate is not None:
+                self._adopt_existing_comment(duplicate)
+                return
         # Mechanical bodies and provenance are immutable after insertion.  A
         # repair may use one audited, exact-row QuerySet.update command; ordinary
         # model/API edits must never restamp or rewrite a workflow audit.
