@@ -65,11 +65,13 @@ constraint-dependencies = ["sqlparse>=0.6.0"]
 # 2026-09-23 — postdating the PLAT-1611 cooldown, so CI resolution fails with
 # "no version of pyjwt==2.15.0" without this override. Same security-fix-floor
 # rationale as the sqlparse override above.
+# PLAT-11009: urllib3 2.8.0 (CVE-2026-97689 fix) was published 2026-09-15,
+# after the cooldown. Same security-fix-floor override as pyjwt.
 # PLAT-12493: pillow 13.0.0 (CVE-2026-112398 fix floor) published 2026-10-16,
 # after the cooldown. Same security-fix override as sqlparse and pyjwt.
 # PLAT-12182: certifi 2026.10.23 (GHSA-6q48-6c7w-9gw2 floor >=2026.10.19)
 # published 2026-10-23, after the cooldown. Same security-fix override.
-exclude-newer-package = { sqlparse = "2026-08-13T19:16:10Z", pyjwt = "2026-09-24T00:00:00Z", pillow = "2026-10-18T00:00:00Z", certifi = "2026-10-24T00:00:00Z" }
+exclude-newer-package = { sqlparse = "2026-08-13T19:16:10Z", pyjwt = "2026-09-24T00:00:00Z", urllib3 = "2026-09-16T00:00:00Z", pillow = "2026-10-18T00:00:00Z", certifi = "2026-10-24T00:00:00Z" }
 # PLAT-1611 (semgrep uv-missing-dependency-cooldown, CWE-829): wait ~7 days before
 # resolving newly published package versions, so a freshly-published malicious or
 # broken release isn't pulled into a build immediately.
