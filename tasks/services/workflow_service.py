@@ -19158,6 +19158,13 @@ class WorkflowService:
             # boundary for this mode. Explicit holds still fail closed; do not
             # fall through and reinterpret it as resident capacity.
             return WorkflowService._is_agent_wakeable_for_new_assignment(norm)
+        # PLAT-12205: a Hive-hibernated seat is not a failover target. The
+        # published hibernated set outranks a green telemetry sample, which
+        # otherwise let a hibernated seat win the pick (aoi → chika). This
+        # sits AFTER the wakeable short-circuit: allow_wakeable=True is the
+        # only admission of a hibernated seat, and only when the caller asked.
+        if norm and (aliases & WorkflowService._hibernated_agent_emails()):
+            return False
         # Runtime/provider health DOWN must beat a stale durable active=True row.
         # AgentAvailability is still authoritative for durable OFF states, but a
         # force/on-leave row cannot make an exhausted provider serve inference.
