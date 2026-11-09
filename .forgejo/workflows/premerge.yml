@@ -14,7 +14,12 @@
 # The combined tree is local to the pod and is never pushed.
 name: premerge
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        description: "Exact advertised base SHA for the PLS-702 combined-tree fence (required for dispatch laps; pull_request runs ignore this input)"
+        required: false
+        type: string
   pull_request:
 
 jobs:
@@ -111,7 +116,11 @@ jobs:
                           http://repo-config-probe.origin.svc.cluster.local:8080/contracts/repository
                     env:
                       - name: SOURCE_SHA
-                        value: "${{ github.event.pull_request.head.sha }}"
+                        # pull_request events carry the head on the event; workflow_dispatch
+                        # laps do not — fall back to github.sha (the dispatched ref's commit).
+                        # Empty SOURCE_SHA exits 64 at the fence and kills every dispatch
+                        # lap in ~13s (run 10349/10329 class, 2026-11-09).
+                        value: "${{ github.event.pull_request.head.sha || github.sha }}"
                   - name: git-clone
                     image: alpine/git:2.43.0
                     command: ["/bin/sh","-c"]
@@ -212,7 +221,10 @@ jobs:
                       - name: GIT_BASE_URL
                         value: "${{ github.event.pull_request.base.repo.clone_url }}"
                       - name: GIT_BASE_SHA
-                        value: "${{ github.event.pull_request.base.sha }}"
+                        # Dispatch laps declare their base via the base_sha input;
+                        # pull_request events carry it on the event. Absent both,
+                        # the PLS-702 fence still refuses (fail-closed).
+                        value: "${{ inputs.base_sha || github.event.pull_request.base.sha }}"
                     volumeMounts: [{ mountPath: /workspace, name: workspace }]
                 containers:
                   - name: test

@@ -56,10 +56,51 @@ class PremergeCombinedTreeContractTests(unittest.TestCase):
         self.assertNotIn('pull_request_target', self.src)
 
     # ---- item 1: both sides fetched by EXACT sha ---------------------------
+    #
+    # 2026-11-09 (pulse#952): the env chains gained workflow_dispatch fallbacks
+    # so manual exact-head laps can run (runs 10329/10349 died at the fences
+    # with empty pull_request event fields). The contract intent is unchanged —
+    # every arm of both chains resolves to an EXACT commit SHA, never a moving
+    # ref — so the assertions moved from byte-literal single-event values to
+    # the full chain literals. The refusal twins below keep the file from
+    # drifting to a moving-ref fallback (PLS-702's core).
 
     def test_head_and_base_are_both_supplied_as_exact_shas(self):
-        self.assertIn('value: "${{ github.event.pull_request.head.sha }}"', self.src)
-        self.assertIn('value: "${{ github.event.pull_request.base.sha }}"', self.src)
+        """Head chain: pull_request events carry the head; dispatch laps fall
+        back to github.sha (the dispatched ref's commit — an exact SHA).
+        """
+        self.assertIn(
+            'value: "${{ github.event.pull_request.head.sha || github.sha }}"',
+            self.src,
+        )
+        # refusal twin: no moving-ref arm anywhere in the head chain
+        head_chain_lines = [
+            line for line in self.src.splitlines()
+            if 'github.event.pull_request.head.sha' in line and 'value:' in line
+        ]
+        self.assertTrue(head_chain_lines, 'head chain env line not found')
+        for line in head_chain_lines:
+            self.assertNotIn(
+                'github.ref', line,
+                msg='moving-ref fallback in the head chain: github.ref',
+            )
+
+    def test_base_sha_chain_declares_input_and_advertised_base(self):
+        """Base chain: dispatch laps declare their base via the `base_sha`
+        input; pull_request events carry the advertised base. Absent both,
+        the PLS-702 fence still refuses (fail-closed) — this input is a
+        declaration, never a substitution for an absent advertised base.
+        """
+        self.assertIn(
+            'value: "${{ inputs.base_sha || github.event.pull_request.base.sha }}"',
+            self.src,
+        )
+        # refusal twin: the declaring input must stay declared
+        self.assertRegex(
+            self.src, r'(?m)^\s+base_sha:\s*$',
+            msg='workflow_dispatch base_sha input removed: dispatch laps '
+                'would silently lose their base declaration',
+        )
 
     def test_base_repo_clone_url_is_advertised_not_assumed(self):
         """A fork PR's base repo is not its head repo; take the advertised one."""
