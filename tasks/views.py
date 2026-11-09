@@ -10532,6 +10532,31 @@ class CommentViewSet(viewsets.ModelViewSet):
                 )
                 raise drf_serializers.ValidationError(diagnostic)
 
+        # Comment-noise guardrails (2026-11-09 audit): max length, idempotent
+        # replay of an identical body, and per-author rate limits.
+        from .services.comment_admission import (
+            CommentRateLimited, CommentTooLong, admit_user_comment,
+        )
+        try:
+            replay = admit_user_comment(
+                item=item,
+                author_id=user.id,
+                author_email=getattr(user, 'email', ''),
+                content=serializer.validated_data.get('content', ''),
+                parent=serializer.validated_data.get('parent'),
+            )
+        except CommentTooLong as exc:
+            raise drf_serializers.ValidationError({'content': [str(exc)]})
+        except CommentRateLimited as exc:
+            from rest_framework.exceptions import Throttled
+            raise Throttled(wait=exc.retry_after, detail=exc.detail)
+        if replay is not None:
+            # Same author re-posted the same body on the same item within the
+            # duplicate window: return the existing comment, write nothing and
+            # notify nobody again.
+            serializer.instance = replay
+            return
+
         serializer.save(
             author_id=user.id,
             author_email=user.email,
