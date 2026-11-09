@@ -86,22 +86,22 @@ class OriginProvenanceTests(SimpleTestCase):
             with self.subTest(value=value):
                 self.assertIsNone(parse_linked_pr_identity(value))
 
-    def test_frozen_origin_shizuha_is_not_cli_development_sot(self):
-        reason = development_repo_block_reason('shizuha-labs', 'shizuha')
+    def test_retired_shizuha_beta_is_not_development_sot(self):
+        reason = development_repo_block_reason('shizuha-labs', 'shizuha-beta')
         self.assertIsNotNone(reason)
-        self.assertIn('shizuha-beta', reason)
-        self.assertIsNone(development_repo_block_reason('shizuha-labs', 'shizuha-beta'))
+        self.assertIn('shizuha-labs/shizuha', reason)
+        self.assertIsNone(development_repo_block_reason('shizuha-labs', 'shizuha'))
         self.assertIsNone(development_repo_block_reason('shizuha-labs', 'hive'))
         self.assertIsNotNone(linked_pr_development_block_reason(
-            'https://origin.shizuha.com/shizuha-labs/shizuha/pulls/28',
+            'https://origin.shizuha.com/shizuha-labs/shizuha-beta/pulls/28',
         ))
         self.assertIsNotNone(linked_pr_development_block_reason(
-            'https://github.com/shizuha-labs/shizuha/pull/28',
+            'https://github.com/shizuha-labs/shizuha-beta/pull/28',
         ))
         self.assertIsNone(linked_pr_development_block_reason(
-            'https://origin.shizuha.com/shizuha-labs/shizuha-beta/pulls/1',
+            'https://origin.shizuha.com/shizuha-labs/shizuha/pulls/1',
         ))
-        self.assertIsNotNone(linked_pr_development_block_reason('', 'shizuha-labs/shizuha'))
+        self.assertIsNotNone(linked_pr_development_block_reason('', 'shizuha-labs/shizuha-beta'))
 
     def test_relative_origin_job_url_is_canonical_and_repo_qualified(self):
         parsed = parse_origin_run_url(

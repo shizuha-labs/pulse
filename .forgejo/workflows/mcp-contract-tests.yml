@@ -160,7 +160,7 @@ jobs:
                         export ORIGIN_INTERNAL_HOST_ALIASES=forgejo-http.origin.svc,forgejo-http.origin.svc.cluster.local
                         export ORIGIN_LEGACY_HOST_ALIASES=git.shizuha.com
                         export ORIGIN_CI_LOGS_URL=http://ci-logs.origin.svc.cluster.local:8080/logs
-                        export PULSE_FROZEN_DEVELOPMENT_REPOS='{"shizuha-labs/shizuha":"Origin shizuha-labs/shizuha is frozen (2026-08-15). CLI/harness development SoT is origin.shizuha.com/shizuha-labs/shizuha-beta. Clone, branch, open, and link PRs on shizuha-beta only."}'
+                        export PULSE_FROZEN_DEVELOPMENT_REPOS='{"shizuha-labs/shizuha-beta":"Repository shizuha-labs/shizuha-beta is retired (renamed to shizuha-labs/shizuha, PLAT-5398/ADR-0057). Development SoT is origin.shizuha.com/shizuha-labs/shizuha. Clone, branch, open, and link PRs on shizuha-labs/shizuha."}'
                         export PULSE_OPERATOR_EMAIL=operator@example.test PULSE_COS_EMAIL=shizuha@shizuha.com
                         export PULSE_SUPPRESSED_THERMAL_HOSTS=gx10-4,10.200.10.4
                         # (1) The MCP↔serializer contract suite (PLAT-1355).

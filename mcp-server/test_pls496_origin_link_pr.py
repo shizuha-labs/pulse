@@ -348,14 +348,14 @@ class OriginLinkPrHeadShaTests(unittest.TestCase):
 
     def test_plain_owner_repo_key_relink_backfills_existing_row(self):
         """Live recurrence: rendered ``owner/repo#N`` keys must refresh too."""
-        short_key = "shizuha-labs/shizuha-beta#21"
+        short_key = "shizuha-labs/shizuha#21"
         item = {
             "id": 1,
             "item_key": "PLAT-4638",
             "metadata": {
                 "pull_requests": [{
                     "url": short_key,
-                    "repo": "shizuha-labs/shizuha-beta",
+                    "repo": "shizuha-labs/shizuha",
                     "number": 21,
                     "status": "open",
                 }]
@@ -390,7 +390,7 @@ class OriginLinkPrHeadShaTests(unittest.TestCase):
         self.assertEqual(
             seen_urls,
             ["https://origin.shizuha.com/api/v1/repos/"
-             "shizuha-labs/shizuha-beta/pulls/21"],
+             "shizuha-labs/shizuha/pulls/21"],
         )
         pr = patches[0]["metadata"]["pull_requests"][0]
         self.assertEqual(pr["head_sha"], "befafda13de4")
@@ -623,7 +623,7 @@ class OriginLinkPrHeadShaTests(unittest.TestCase):
         self.assertIn("Error refreshing", out)
         self.assertNotIn("Refreshed PR", out)
 
-    def test_frozen_origin_shizuha_pr_is_rejected(self):
+    def test_retired_shizuha_beta_pr_is_rejected(self):
         item = {"id": 1, "item_key": "SCLI-586", "metadata": {"pull_requests": []}}
         patches = []
 
@@ -639,12 +639,12 @@ class OriginLinkPrHeadShaTests(unittest.TestCase):
              mock.patch.object(pulse_server.requests, "get") as get:
             out = pulse_server.link_pr(
                 "SCLI-586",
-                "https://origin.shizuha.com/shizuha-labs/shizuha/pulls/28",
+                "https://origin.shizuha.com/shizuha-labs/shizuha-beta/pulls/28",
             )
             get.assert_not_called()
 
         self.assertIn("ERROR:", out)
-        self.assertIn("shizuha-beta", out)
+        self.assertIn("shizuha-labs/shizuha", out)
         self.assertEqual(patches, [])
 
 
