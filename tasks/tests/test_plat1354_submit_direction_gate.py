@@ -195,6 +195,56 @@ class SubmitRequiresCurrentDirectionTests(TestCase):
 
         WorkflowService._run_validators(_transition(), item)
 
+    def test_system_failover_notice_does_not_rearm_after_author_ack(self):
+        """PLAT-13153: untyped system@pulse failover is not reviewer direction."""
+        head_at = timezone.now() - timedelta(minutes=10)
+        item = _item(head_at=head_at)
+        direction_at = head_at + timedelta(minutes=1)
+        _comment(item, 'revi@shizuha.com', 'P1: read this before resubmitting.', direction_at)
+        _comment(
+            item,
+            'author@agents.shizuha.io',
+            'ack: read and incorporated the reviewer direction.',
+            direction_at + timedelta(minutes=1),
+        )
+        notice = _comment(
+            item,
+            'system@pulse',
+            'Auto-failover to **riku@shizuha.com** — primary **jun** is unavailable.',
+            direction_at + timedelta(minutes=2),
+        )
+        Comment.objects.filter(pk=notice.pk).update(author_id=0)
+        notice.refresh_from_db()
+
+        WorkflowService._run_validators(_transition(), item)
+
+    def test_spoofed_system_email_from_a_real_author_still_blocks(self):
+        head_at = timezone.now() - timedelta(minutes=10)
+        item = _item(head_at=head_at)
+        # Non-zero author_id (the helper default) keeps a spoofed system
+        # address in the direction set when that address is a review seat.
+        # The spoofed address must still be a syntactically valid email —
+        # TeamRoster.validate_roster_structure rejects invalid addresses
+        # (char-splat guard), so 'system@pulse' cannot be planted here.
+        TeamRoster.objects.update_or_create(
+            team_name='review',
+            defaults={
+                'tiers': [['revi@shizuha.com', 'system@pulse.shizuha.com']],
+                'junior_emails': [],
+                'is_active': True,
+                'note': 'PLAT-13153 spoof roster',
+            },
+        )
+        _comment(
+            item,
+            'system@pulse.shizuha.com',
+            'P1: this row has a non-zero author and stays direction.',
+            head_at + timedelta(minutes=1),
+        )
+
+        with self.assertRaises(WorkflowValidationError):
+            WorkflowService._run_validators(_transition(), item)
+
     def test_missing_head_timestamp_fails_open_for_legacy_pr_metadata(self):
         item = _item()
         meta = item.metadata
