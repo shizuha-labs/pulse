@@ -44,6 +44,7 @@ those bodies could weaken an anti-churn guard. They are listed in
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from datetime import timedelta
@@ -173,6 +174,60 @@ def find_recent_automation_duplicate(comment):
         .order_by('-created_at')
         .first()
     )
+
+
+def automation_admission_lock_keys(comment):
+    """PLS-1478: stable two-int32 advisory-lock key for (item, author, body).
+
+    Two concurrent sweep workers that admit the same body must map to the SAME
+    lock key so the second serializes behind the first and its re-check sees
+    the first worker's committed row. Different bodies/items/authors map to
+    different keys and never contend.
+    """
+    digest = hashlib.sha256(
+        f'{comment.item_id}|{comment.author_email}|{comment.content}'.encode('utf-8')
+    ).digest()
+    return (
+        int.from_bytes(digest[0:4], 'big') & 0x7FFFFFFF,
+        int.from_bytes(digest[4:8], 'big') & 0x7FFFFFFF,
+    )
+
+
+def acquire_automation_admission_lock(comment):
+    """Take the transaction-scoped advisory lock for this comment's identity.
+
+    MUST be called inside ``transaction.atomic()``: ``pg_advisory_xact_lock``
+    is held until the surrounding transaction commits or rolls back, which is
+    exactly the check-then-insert critical section. No-op on non-PostgreSQL
+    vendors (house pattern, tasks.tasks.py) so the sqlite test suite is
+    unaffected; sqlite serializes writers anyway.
+    """
+    from django.db import connection
+
+    if connection.vendor != 'postgresql':
+        return
+    key_a, key_b = automation_admission_lock_keys(comment)
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT pg_advisory_xact_lock(%s, %s)', [key_a, key_b])
+
+
+def automation_dedupe_serialization_eligible(comment):
+    """True when this new row takes the serialized (lock + re-check) save path.
+
+    Mirrors the eligibility ``admit_automation_comment`` applies, minus the
+    duplicate lookup itself — the caller uses it to decide whether the insert
+    must happen under the advisory lock.
+    """
+    try:
+        if not is_automation_author(comment.author_email):
+            return False
+        if not _dedupe_eligible(comment):
+            return False
+        window = _int_env('PULSE_AUTOMATION_COMMENT_DEDUPE_MINUTES', 240)
+        return window > 0 and bool(comment.item_id)
+    except Exception:  # pragma: no cover - defensive; never block a sweep
+        logger.exception('comment_admission: eligibility check failed open')
+        return False
 
 
 def admit_automation_comment(comment):
