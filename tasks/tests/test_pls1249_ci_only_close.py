@@ -59,8 +59,8 @@ class MergedContentCiOnlyGateTests(TestCase):
             created_by_id=1,
             created_by_email='jun@shizuha.com',
             metadata={'pull_requests': [{
-                'url': 'https://origin.shizuha.com/shizuha-labs/shizuha-beta/pulls/364',
-                'repo': 'shizuha-labs/shizuha-beta',
+                'url': 'https://origin.shizuha.com/shizuha-labs/shizuha/pulls/364',
+                'repo': 'shizuha-labs/shizuha',
                 'number': 364,
                 'status': 'merged',
                 'merged_at': '2026-09-14T10:00:00Z',

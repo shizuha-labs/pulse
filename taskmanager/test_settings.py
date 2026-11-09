@@ -24,7 +24,7 @@ os.environ.setdefault('ORIGIN_INTERNAL_HOST_ALIASES', 'forgejo-http.origin.svc,f
 os.environ.setdefault('ORIGIN_LEGACY_HOST_ALIASES', 'git.shizuha.com')
 os.environ.setdefault('ORIGIN_CI_LOGS_URL', 'http://ci-logs.origin.svc.cluster.local:8080/logs')
 
-os.environ.setdefault('PULSE_FROZEN_DEVELOPMENT_REPOS', '{"shizuha-labs/shizuha":"Origin shizuha-labs/shizuha is frozen (2026-08-15). CLI/harness development SoT is origin.shizuha.com/shizuha-labs/shizuha-beta. Clone, branch, open, and link PRs on shizuha-beta only."}')
+os.environ.setdefault('PULSE_FROZEN_DEVELOPMENT_REPOS', '{"shizuha-labs/shizuha-beta":"Repository shizuha-labs/shizuha-beta is retired (renamed to shizuha-labs/shizuha, PLAT-5398/ADR-0057). Development SoT is origin.shizuha.com/shizuha-labs/shizuha. Clone, branch, open, and link PRs on shizuha-labs/shizuha."}')
 os.environ.setdefault('PULSE_OPERATOR_EMAIL', 'operator@example.test')
 os.environ.setdefault('PULSE_COS_EMAIL', 'shizuha@shizuha.com')
 os.environ.setdefault('PULSE_SUPPRESSED_THERMAL_HOSTS', 'gx10-4,10.200.10.4')

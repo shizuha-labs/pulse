@@ -1,10 +1,11 @@
 """PLAT-6226: review re-entry gate must not wedge on frozen Origin dev repos.
 
-A frozen Origin dev repo (e.g. ``shizuha-labs/shizuha``, archived 2026-08-15,
-split-brain stop) returns HTTP 404 from the provider, so its linked PR's head
-can never be live-confirmed and the re-entry gate would fail-close the task
-forever — even when the real fix rides a fresh, live-confirmed active Origin
-PR (e.g. ``shizuha-beta#216``). This mirrors the retired-GitHub-mirror carve-out
+A frozen Origin dev line (e.g. the retired name ``shizuha-labs/shizuha-beta``,
+renamed to ``shizuha-labs/shizuha`` per PLAT-5398/ADR-0057) has no live
+provider identity for new obligations, so its linked PR's head can never be
+live-confirmed and the re-entry gate would fail-close the task forever — even
+when the real fix rides a fresh, live-confirmed active Origin PR on the
+canonical repo (e.g. ``shizuha#216``). This mirrors the retired-GitHub-mirror carve-out
 (PLAT-4675 Facet 2 / ORIG-18) for frozen Origin dev lines, with the same
 security preconditions: the exempting Origin PR must be exact, live-confirmed,
 currently open, carry provenance, and NOT itself be on a frozen repo.
@@ -19,8 +20,8 @@ from django.test import TestCase
 from tasks.models import Item
 from tasks.services.workflow_service import WorkflowService, WorkflowValidationError
 
-FROZEN_URL = 'https://origin.shizuha.com/shizuha-labs/shizuha/pulls/27'
-FIX_URL = 'https://origin.shizuha.com/shizuha-labs/shizuha-beta/pulls/216'
+FROZEN_URL = 'https://origin.shizuha.com/shizuha-labs/shizuha-beta/pulls/27'
+FIX_URL = 'https://origin.shizuha.com/shizuha-labs/shizuha/pulls/216'
 _key_counter = itertools.count(1)
 
 
@@ -74,7 +75,7 @@ def _confirm_frozen_fails(confirm_fix=True):
             raise RuntimeError('frozen repo 404')
         if key == FIX_URL and confirm_fix:
             return (
-                'forgejo', 'shizuha-labs', 'shizuha-beta', 216,
+                'forgejo', 'shizuha-labs', 'shizuha', 216,
                 _FakeResponse(200, {'state': 'open', 'head': {'sha': '6b497903'}}),
             )
         raise RuntimeError('unknown url')
@@ -85,12 +86,12 @@ def _confirm_frozen_fails(confirm_fix=True):
 @mock.patch.dict(os.environ, {'FORGEJO_TOKEN': 'test-token', 'GITHUB_TOKEN': ''})
 class Plat6226FrozenOriginReentryTests(TestCase):
     def test_frozen_origin_pr_exempt_when_active_fix_pr_confirmed(self):
-        """SCLI-582 shape: frozen shizuha#27 bounced + live-confirmed shizuha-beta#216 → pass."""
+        """SCLI-582 shape: frozen shizuha-beta#27 bounced + live-confirmed shizuha#216 → pass."""
         item = _item(
             pull_requests=[
-                {'url': FROZEN_URL, 'repo': 'shizuha-labs/shizuha', 'number': 27,
+                {'url': FROZEN_URL, 'repo': 'shizuha-labs/shizuha-beta', 'number': 27,
                  'status': 'open', 'head_sha': 'd936674d'},
-                {'url': FIX_URL, 'repo': 'shizuha-labs/shizuha-beta', 'number': 216,
+                {'url': FIX_URL, 'repo': 'shizuha-labs/shizuha', 'number': 216,
                  'status': 'open', 'head_sha': '6b497903'},
             ],
             metadata_extra={
@@ -107,7 +108,7 @@ class Plat6226FrozenOriginReentryTests(TestCase):
         """No active fix PR → the frozen row stays an open obligation."""
         item = _item(
             pull_requests=[
-                {'url': FROZEN_URL, 'repo': 'shizuha-labs/shizuha', 'number': 27,
+                {'url': FROZEN_URL, 'repo': 'shizuha-labs/shizuha-beta', 'number': 27,
                  'status': 'open', 'head_sha': 'd936674d'},
             ],
             metadata_extra={
@@ -123,9 +124,9 @@ class Plat6226FrozenOriginReentryTests(TestCase):
         """Fix PR not live-confirmed → the frozen row is not waived (fail-closed)."""
         item = _item(
             pull_requests=[
-                {'url': FROZEN_URL, 'repo': 'shizuha-labs/shizuha', 'number': 27,
+                {'url': FROZEN_URL, 'repo': 'shizuha-labs/shizuha-beta', 'number': 27,
                  'status': 'open', 'head_sha': 'd936674d'},
-                {'url': FIX_URL, 'repo': 'shizuha-labs/shizuha-beta', 'number': 216,
+                {'url': FIX_URL, 'repo': 'shizuha-labs/shizuha', 'number': 216,
                  'status': 'open', 'head_sha': '6b497903'},
             ],
             metadata_extra={
@@ -144,7 +145,7 @@ class Plat6226FrozenOriginReentryTests(TestCase):
             pull_requests=[
                 {'url': normal_url, 'repo': 'shizuha-labs/deploy', 'number': 10,
                  'status': 'open', 'head_sha': 'same-head'},
-                {'url': FIX_URL, 'repo': 'shizuha-labs/shizuha-beta', 'number': 216,
+                {'url': FIX_URL, 'repo': 'shizuha-labs/shizuha', 'number': 216,
                  'status': 'open', 'head_sha': '6b497903'},
             ],
             metadata_extra={
@@ -162,7 +163,7 @@ class Plat6226FrozenOriginReentryTests(TestCase):
                 )
             if key == FIX_URL:
                 return (
-                    'forgejo', 'shizuha-labs', 'shizuha-beta', 216,
+                    'forgejo', 'shizuha-labs', 'shizuha', 216,
                     _FakeResponse(200, {'state': 'open', 'head': {'sha': '6b497903'}}),
                 )
             raise RuntimeError('unknown url')
@@ -180,7 +181,7 @@ class Plat6226FrozenOriginReentryTests(TestCase):
         the frozen key without requiring an active Origin PR."""
         item = _item(
             pull_requests=[
-                {'url': FROZEN_URL, 'repo': 'shizuha-labs/shizuha', 'number': 27,
+                {'url': FROZEN_URL, 'repo': 'shizuha-labs/shizuha-beta', 'number': 27,
                  'status': 'open', 'head_sha': 'd936674d'},
             ],
             metadata_extra={
@@ -201,7 +202,7 @@ class Plat6226FrozenOriginReentryTests(TestCase):
         item = _item(
             pull_requests=[
                 {'url': 'no-pr'},
-                {'url': FROZEN_URL, 'repo': 'shizuha-labs/shizuha', 'number': 27,
+                {'url': FROZEN_URL, 'repo': 'shizuha-labs/shizuha-beta', 'number': 27,
                  'status': 'open', 'head_sha': 'd936674d'},
             ],
             metadata_extra={
