@@ -12559,6 +12559,14 @@ class WorkflowService:
                 # mechanical tuple. Legacy/missing/unknown/mismatched/spoofed
                 # provenance continues through the authoritative-seat gate.
                 if not MechanicalCommentFactory.is_allowlisted(c)
+                # PLAT-13153: failover and capacity notices are minted as
+                # untyped system@pulse rows (tasks._create_system_comment_deduped).
+                # They are not reviewer direction, and an author cannot ack them.
+                # A spoofed system@pulse row from a non-zero author stays in.
+                if not (
+                    (getattr(c, 'author_email', '') or '').strip().lower() == 'system@pulse'
+                    and getattr(c, 'author_id', None) == 0
+                )
                 if (getattr(c, 'author_email', '') or '').strip().lower() not in author_emails
                 # PLS-895: only the explicit terminal Reopen operation passes
                 # recovery actors here.  Their accepted ack/rebuttal marker is
