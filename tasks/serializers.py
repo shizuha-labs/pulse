@@ -1128,6 +1128,10 @@ class ItemListSerializer(OwnerActionPolicyMixin, serializers.ModelSerializer):
     origin_observations = serializers.SerializerMethodField()
     status_category = serializers.SerializerMethodField()
     owner_action_policy = serializers.SerializerMethodField()
+    # PLAT-9622: queue_order lists already annotate this. Surface it so the MCP
+    # ready-lane does not count a todo row with an active incoming blocks link
+    # as ready/movable. Absent annotation stays false.
+    has_active_upstream_blocker = serializers.SerializerMethodField()
     last_comment_at = serializers.SerializerMethodField()
     comment_count = serializers.SerializerMethodField()
     assignee_health = serializers.SerializerMethodField()
@@ -1151,6 +1155,7 @@ class ItemListSerializer(OwnerActionPolicyMixin, serializers.ModelSerializer):
             'project', 'project_key', 'project_name', 'organization_id',
             'assignee_id', 'assignee_email', 'assignment_group', 'workflow_name', 'workflow_status', 'assignee_health',
             'due_date', 'start_date', 'priority', 'severity', 'status', 'status_category', 'owner_action_policy',
+            'has_active_upstream_blocker',
             'sprint', 'story_points', 'percent_complete', 'parent_item', 'parent_item_key', 'parent_item_title',
             'is_recurring', 'recurring_cycle', 'tags', 'labels',
             'containment_decision',
@@ -1165,6 +1170,9 @@ class ItemListSerializer(OwnerActionPolicyMixin, serializers.ModelSerializer):
             # Alert-specific summary fields
             'occurrence_count', 'fingerprint',
         ]
+
+    def get_has_active_upstream_blocker(self, obj):
+        return bool(getattr(obj, '_queue_has_active_upstream', False))
 
     def get_assignee_health(self, obj):
         return _agent_health_for_email(obj.assignee_email)
