@@ -20,6 +20,11 @@ import pathlib
 import subprocess
 import unittest
 
+from django.test import TestCase  # sora review 7692: module-scope import — the
+# RecorderPolicy403ClassificationTests class below references TestCase; a bare
+# `import unittest` left the name undefined and any runner importing this file
+# crashed with NameError before any test executed (premerge run 10436).
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / '.forgejo/scripts/record-deployment-event.sh'
@@ -129,3 +134,31 @@ class PodImageDigestSelectorTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RecorderPolicy403ClassificationTests(TestCase):
+    """PLAT-12954 mirror: the deploy-lane recorder must treat the ingest
+    endpoint's staff-only 403 as policy degradation (typed receipt, exit 0),
+    never as a deploy failure, while every other failure class still fails
+    the run loud."""
+
+    def _script(self):
+        # sora review 7692: ROOT-relative read — a CWD-relative Path would
+        # break test custody under any runner CWD != repo root, unlike the
+        # existing suites in this file which resolve ROOT from __file__.
+        return (ROOT / '.forgejo/scripts/record-deployment-event.sh').read_text()
+
+    def test_policy_403_degrades_before_failure_guard(self):
+        script = self._script()
+        self.assertIn('INGEST_HTTP_CODE', script)
+        degrade = script.index('"$INGEST_HTTP_CODE" = "403"')
+        guard = script.index('!= "200" ] && [ "$INGEST_HTTP_CODE" != "201" ]')
+        self.assertLess(degrade, guard)
+        self.assertIn('PLAT-12954 policy: DeploymentEvent ingestion is staff-only', script)
+        self.assertIn('exit 0', script[degrade:guard])
+
+    def test_non_policy_failures_still_fail_loud(self):
+        script = self._script()
+        guard = script.index('!= "200" ] && [ "$INGEST_HTTP_CODE" != "201" ]')
+        self.assertIn('::error::DeploymentEvent ingest failed', script[guard:])
+        self.assertIn('exit 1', script[guard:])
