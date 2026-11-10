@@ -131,9 +131,11 @@ class MinterSweepTests(TestCase):
             DeploymentEvent.objects.filter(commit_sha=HEAD_SHA).count(), 1)
 
     @mock.patch.dict('os.environ', {'FORGEJO_TOKEN': 'tok'})
+    @mock.patch('tasks.management.commands.mint_deployment_events._http_get')
     @mock.patch('tasks.management.commands.mint_deployment_events._http_json')
-    def test_skips_unverifiable_log_without_id_token(self, json_mock):
-        """No SHIZUHA_ID_TOKEN -> log fetch unverifiable -> fail-closed skip."""
+    def test_skips_unverifiable_log(self, json_mock, get_mock):
+        """Log fetch failure on every configured source -> fail-closed skip."""
+        get_mock.side_effect = OSError('log source unreachable')
         def json_side(url, token=None, timeout=30):
             if '/actions/tasks' in url:
                 return RUNS_RESPONSE
@@ -149,6 +151,35 @@ class MinterSweepTests(TestCase):
         self.assertIn('"minted": 0', out)
         self.assertFalse(
             DeploymentEvent.objects.filter(commit_sha=HEAD_SHA).exists())
+
+    @mock.patch.dict('os.environ', {'FORGEJO_TOKEN': 'tok'})
+    @mock.patch('tasks.management.commands.mint_deployment_events._http_get')
+    @mock.patch('tasks.management.commands.mint_deployment_events._http_json')
+    def test_proof_prefers_forgejo_logs_api(self, json_mock, get_mock):
+        """No new credential: the Forgejo Actions logs API (inherited
+        FORGEJO_TOKEN) is the primary proof source."""
+        def json_side(url, token=None, timeout=30):
+            if '/actions/tasks' in url:
+                return RUNS_RESPONSE
+            if url.endswith('/repos/shizuha-labs/hive'):
+                return REPO_INFO
+            if '/commits?' in url:
+                return COMMITS_RESPONSE
+            raise AssertionError(url)
+
+        json_mock.side_effect = json_side
+        seen_urls = []
+
+        def get_side(url, token=None, timeout=30, headers=None):
+            seen_urls.append(url)
+            return PROOF_LOG
+
+        get_mock.side_effect = get_side
+        self._call()
+        event = DeploymentEvent.objects.get(commit_sha=HEAD_SHA)
+        self.assertEqual(event.state, 'smoke_passed')
+        self.assertTrue(seen_urls)
+        self.assertIn('/actions/tasks/%s/logs' % RUN_ID, seen_urls[0])
 
     @mock.patch.dict('os.environ', {'FORGEJO_TOKEN': 'tok',
                                     'SHIZUHA_ID_TOKEN': 'idtok'})

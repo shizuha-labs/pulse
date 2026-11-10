@@ -157,7 +157,7 @@ class Command(BaseCommand):
                     continue
                 # (c) rollout proof from the run log (fail-closed)
                 proof = self._parse_rollout_proof(
-                    opts['ci_logs_url'], org, repo, run_id)
+                    opts['forgejo_url'], org, repo, run_id)
                 if not self._proof_converged(proof):
                     summary['skipped_unverifiable'] += 1
                     continue
@@ -218,26 +218,45 @@ class Command(BaseCommand):
                            org, repo, exc)
         return False
 
-    def _parse_rollout_proof(self, ci_logs_url, org, repo, run_id):
-        """Fetch the run log via the ci-logs sidecar and parse the rollout
-        proof markers. Returns {} on ANY fetch failure (fail-closed)."""
-        token = os.environ.get('SHIZUHA_ID_TOKEN', '').strip()
-        if not token:
-            logger.warning('minter: SHIZUHA_ID_TOKEN absent — log fetch '
-                           'unverifiable (fail-closed skip)')
+    def _parse_rollout_proof(self, base, org, repo, run_id):
+        """Fetch the run log and parse the rollout proof markers.
+
+        Proof-source order (no new credential — PLAT-12954 trust boundary):
+          1. Forgejo Actions logs API with the inherited FORGEJO_TOKEN
+             (read:repository — the same bytes the ci-logs sidecar mirrors).
+          2. ci-logs sidecar with SHIZUHA_ID_TOKEN, only if configured.
+        Returns {} on ANY fetch failure (fail-closed).
+        """
+        forgejo_token = os.environ.get('FORGEJO_TOKEN', '').strip()
+        urls = []
+        if forgejo_token:
+            urls.append((f'{base.rstrip("/")}/api/v1/repos/{org}/{repo}'
+                         f'/actions/tasks/{run_id}/logs', forgejo_token,
+                         'token'))
+        sidecar_token = os.environ.get('SHIZUHA_ID_TOKEN', '').strip()
+        if sidecar_token:
+            urls.append((f'{DEFAULT_CI_LOGS.rstrip("/")}'
+                         f'/logs?repo={org}/{repo}&run={run_id}',
+                         sidecar_token, 'Bearer'))
+        if not urls:
+            logger.warning('minter: no log-fetch credential available '
+                           '(fail-closed skip)')
             return {}
-        url = (f'{ci_logs_url.rstrip("/")}/logs?repo={org}/{repo}&run={run_id}')
-        for attempt in range(1, 4):
-            try:
-                log_text = _http_get(
-                    url, timeout=30,
-                    headers={'Authorization': f'Bearer {token}'})
+        log_text = None
+        for url, token, scheme in urls:
+            for attempt in range(1, 3):
+                try:
+                    log_text = _http_get(
+                        url, timeout=30,
+                        headers={'Authorization': f'{scheme} {token}'})
+                    break
+                except Exception as exc:
+                    logger.info('minter: log fetch attempt %d failed: %s',
+                                attempt, exc)
+                    time.sleep(2 * attempt)
+            if log_text is not None:
                 break
-            except Exception as exc:
-                logger.info('minter: log fetch attempt %d failed: %s',
-                            attempt, exc)
-                time.sleep(2 * attempt)
-        else:
+        if log_text is None:
             return {}
         proof = {}
         for name, pattern in _PROOF_PATTERNS.items():
