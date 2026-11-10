@@ -819,9 +819,19 @@ def _task_status_slug(task: dict) -> str:
     ).strip().lower()
 
 
+def _has_active_upstream_blocker(task: dict) -> bool:
+    """PLAT-9622: a non-terminal incoming blocks link is waiting, whatever the status.
+
+    The list payload carries ``has_active_upstream_blocker`` only when the
+    server annotated the queue. Missing or false keeps the old status-only rule.
+    """
+    return bool(task.get('has_active_upstream_blocker'))
+
+
 def _is_backlog_pull_ready(task: dict) -> bool:
     return (
         task.get('owner_action_policy') != 'awareness'
+        and not _has_active_upstream_blocker(task)
         and _task_status_slug(task) not in BACKLOG_PULL_WAITING_STATUSES
     )
 
@@ -1698,6 +1708,7 @@ def _fmt_items(items: list, label: str = "task", hidden_terminal: int = 0, hidde
         and (
             (it.get('status') or '').lower() in BACKLOG_PULL_WAITING_STATUSES
             or (it.get('status') or '').lower() in PARKED_WAITING_SLUGS
+            or _has_active_upstream_blocker(it)
         )
     )
     terminal = sum(

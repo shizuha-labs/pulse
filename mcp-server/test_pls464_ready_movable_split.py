@@ -80,6 +80,18 @@ class Pls464ReadyMovableSplitTests(unittest.TestCase):
         self.assertIn("No ready/movable tasks found", out)
         self.assertNotIn("actionable", out)
 
+    def test_todo_with_active_upstream_blocker_is_waiting(self):
+        """PLAT-9622: CON-465 was todo with an incoming blocks link and counted ready."""
+        blocked = dict(_t("CON-465", "todo"), has_active_upstream_blocker=True)
+        out = pulse_server._fmt_items([blocked, _t("OK-1", "in_progress")])
+        self.assertIn("2 active (1 ready/movable, 1 blocked/waiting), 0 terminal", out)
+        self.assertFalse(pulse_server._is_backlog_pull_ready(blocked))
+
+    def test_missing_upstream_flag_stays_status_only(self):
+        item = _t("CON-465", "todo")
+        self.assertTrue(pulse_server._is_backlog_pull_ready(item))
+        self.assertIn("1 ready/movable", pulse_server._fmt_items([item]))
+
     def test_unknown_status_counts_ready(self):
         # A status not in any allow-list is non-terminal and not blocked/waiting
         # -> ready/movable (fail-open toward movable, matching _is_backlog_pull_ready).
