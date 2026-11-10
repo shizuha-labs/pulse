@@ -199,6 +199,24 @@ class LiveBoundaryEvidenceGateTests(TestCase):
         self.item.refresh_from_db()
         self.assertEqual(self.item.status, 'needs_triage')
 
+    def test_published_template_satisfies_its_own_gate(self):
+        """PLAT-10338: the gate's own instruction must not be an always-deny."""
+        self.assertIsNone(WorkflowService._live_boundary_gap([
+            WorkflowService.LIVE_BOUNDARY_PUBLISHED_TEMPLATE,
+        ]))
+
+    def test_deny_names_unmet_predicates(self):
+        self._comment('## Live-boundary evidence\nIt is fixed now.')
+        with self.assertRaises(WorkflowValidationError) as ctx:
+            WorkflowService.execute_transition(
+                self.item, 'rejected', user=self.actor,
+                transition_id=self.reject_transition_id,
+            )
+        text = str(ctx.exception)
+        self.assertIn('unmet=surface,persist', text)
+        self.assertIn('comments_evaluated=1', text)
+        self.assertIn('heading=True', text)
+
     def test_deps_evidence_without_persisted_assertion_still_denied(self):
         """A deps-surface mention alone (no persisted-layer assertion) stays
         denied — the bar is a caller surface AND the persisted assertion."""
