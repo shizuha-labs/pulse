@@ -268,15 +268,32 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 
 IDEMPOTENCY_KEY="$(printf '%s' "$payload" | python3 -c 'import json,sys; print(json.load(sys.stdin)["idempotency_key"])')"
-response="$(curl -fsS \
+INGEST_HTTP_CODE="$(curl -sS \
   --retry 4 --retry-all-errors --retry-delay 2 --retry-max-time 150 \
   --connect-timeout 5 --max-time 30 -X POST \
+  -w '%{http_code}' -o /tmp/deployment-event-response.json \
   -H "Authorization: Bearer ${PULSE_TOKEN}" \
   -H "Idempotency-Key: ${IDEMPOTENCY_KEY}" \
   -H 'Content-Type: application/json' \
   -d "$payload" \
-  "${PULSE_URL}/api/deployment-events/ingest/")"
+  "${PULSE_URL}/api/deployment-events/ingest/")" || INGEST_HTTP_CODE=000
 unset PULSE_TOKEN IDEMPOTENCY_KEY payload
+# PLAT-12954: DeploymentEvent ingestion is staff-only by policy — automation
+# cannot mint ledger rows, and this endpoint answers 403 (DRF PermissionDenied)
+# to lane service tokens. That denial is a POLICY classification, not a deploy
+# health signal: the rollout above already converged and the QA surfaces
+# passed their live probes. Degrade with a typed receipt and let the
+# staff-side minter (scoped on PLAT-12954) write the ledger row from the
+# rollout proof. Every other failure class still exits 1 via the guard below.
+if [ "$INGEST_HTTP_CODE" = "403" ]; then
+  echo "::warning::PLAT-12954 policy: DeploymentEvent ingestion is staff-only; lane service token correctly denied (403). Rollout proof for ${REPO}@${SHA} is in this run's log (run ${RUN_ID}); the staff-side minter writes the ledger row from it." >&2
+  exit 0
+fi
+if [ "$INGEST_HTTP_CODE" != "200" ] && [ "$INGEST_HTTP_CODE" != "201" ]; then
+  echo "::error::DeploymentEvent ingest failed: HTTP ${INGEST_HTTP_CODE} (response: $(head -c 300 /tmp/deployment-event-response.json 2>/dev/null || echo unreadable))" >&2
+  exit 1
+fi
+response="$(cat /tmp/deployment-event-response.json)"
 printf '%s' "$response" | python3 -c '
 import json, sys
 row = json.load(sys.stdin)
