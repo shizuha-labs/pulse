@@ -11037,15 +11037,17 @@ class WorkflowService:
                 # asserts the persisted layer (DB row / session history / API re-read)
                 # is safe and equal to the rendered layer.
                 if not WorkflowService._has_live_boundary_evidence(item):
-                    raise WorkflowValidationError(
-                        msg or (
-                            "Reject-as-fixed / closure requires ## Live-boundary evidence "
-                            "(PLAT-6192): post a comment with a '## Live-boundary evidence' "
-                            "heading showing the fix working through the REAL caller sequence "
-                            "(API/CLI/browser command + URL) AND asserting the persisted layer "
-                            "(DB row / session history / API re-read) is safe and equal to the "
-                            "rendered output. Helper/unit-level proof alone is denied."
+                    try:
+                        from ..models import Comment
+                        evaluated = list(
+                            Comment.objects.filter(item=item).values_list('content', flat=True)
                         )
+                    except Exception:
+                        evaluated = []
+                    gap = WorkflowService._live_boundary_gap(evaluated) or 'unmet=unknown'
+                    raise WorkflowValidationError(
+                        (msg or WorkflowService.LIVE_BOUNDARY_PUBLISHED_TEMPLATE)
+                        + f" Evaluated: {gap}."
                     )
 
         # PLS-14: BLANKET review-entry gate — applies even when a transition does
@@ -22851,6 +22853,72 @@ class WorkflowService:
             for pr in WorkflowService._linked_pr_entries(item)
         )
 
+    LIVE_BOUNDARY_PUBLISHED_TEMPLATE = (
+        "Reject-as-fixed denied (PLAT-6192): post a `## Live-boundary evidence` "
+        "comment showing the fix through the REAL caller sequence (API/CLI/browser "
+        "command + URL) AND asserting the persisted layer (DB row / session history / "
+        "API re-read) is safe and equal to the rendered output. Helper/unit-level "
+        "proof alone is denied."
+    )
+
+    @staticmethod
+    def _live_boundary_comment_verdict(content):
+        """Return which live-boundary predicates one comment satisfies.
+
+        PLAT-10338: the published instruction template must itself satisfy this
+        check. A gate whose own text cannot pass is an always-deny.
+        """
+        text = (content or '').lower()
+        heading = '## live-boundary evidence' in text
+        surface_signals = (
+            'http', '/api/', 'cli', 'browser', 'endpoint', 'url', 'command',
+            'curl', 'session',
+            'npm ci', 'npm install', 'package-lock', 'package.json',
+            'uv.lock', 'uv sync', 'uv pip', 'pip install',
+            'requirements.txt', 'pyproject.toml', 'cargo build', 'go.sum',
+            'go.mod', 'yarn install', 'pnpm install', 'bun install',
+            'gem install', 'composer install',
+        )
+        persist_signals = (
+            'persist', 'db ', 'database', ' row', 'history', 're-read',
+            'serialized', 'stored', 'saved',
+        )
+        return {
+            'heading': heading,
+            'surface': heading and any(sig in text for sig in surface_signals),
+            'persist': heading and any(sig in text for sig in persist_signals),
+        }
+
+    @staticmethod
+    def _live_boundary_gap(comments):
+        """None when any comment passes; otherwise the unmet predicates.
+
+        The deny reason names the predicates and how many comments were
+        evaluated. It does not echo comment bodies.
+        """
+        evaluated = 0
+        saw_heading = saw_surface = saw_persist = False
+        for content in comments:
+            evaluated += 1
+            verdict = WorkflowService._live_boundary_comment_verdict(content)
+            saw_heading = saw_heading or verdict['heading']
+            saw_surface = saw_surface or verdict['surface']
+            saw_persist = saw_persist or verdict['persist']
+            if verdict['heading'] and verdict['surface'] and verdict['persist']:
+                return None
+        missing = []
+        if not saw_heading:
+            missing.append('heading')
+        if not saw_surface:
+            missing.append('surface')
+        if not saw_persist:
+            missing.append('persist')
+        return (
+            f"unmet={','.join(missing) or 'none'}; "
+            f"heading={saw_heading}; surface={saw_surface}; persist={saw_persist}; "
+            f"comments_evaluated={evaluated}"
+        )
+
     @staticmethod
     def _has_live_boundary_evidence(item):
         """PLAT-6192: does the item carry a '## Live-boundary evidence' comment?
@@ -22870,36 +22938,7 @@ class WorkflowService:
             comments = Comment.objects.filter(item=item).values_list('content', flat=True)
         except Exception:
             return False
-        heading = '## live-boundary evidence'
-        # PLAT-10343: the caller-surface family previously recognized only
-        # network/browser surfaces (http/api/cli/browser/endpoint/url/command/
-        # curl/session). Dependency-advisory evidence proves the real caller
-        # sequence through the PACKAGING surface instead — `npm ci` resolving a
-        # lockfile, `uv sync` against uv.lock, pip/requirements pins — and
-        # never contains any of those substrings, so compliant deps-class
-        # evidence (e.g. PLAT-4450: lockfile @ main pins playwright 1.62.1 >=
-        # fixed 1.55.1, installed via npm ci) was ALWAYS-DENIED regardless of
-        # resolution value. Add the packaging caller surfaces; the bar is
-        # unchanged (a concrete caller surface must still be NAMED — a bare
-        # heading with only the persisted assertion stays denied).
-        surface_signals = (
-            'http', '/api/', 'cli', 'browser', 'endpoint', 'url', 'command',
-            'curl', 'session',
-            # PLAT-10343 dependency/packaging caller surfaces:
-            'npm ci', 'npm install', 'package-lock', 'package.json',
-            'uv.lock', 'uv sync', 'uv pip', 'pip install',
-            'requirements.txt', 'pyproject.toml', 'cargo build', 'go.sum',
-            'go.mod', 'yarn install', 'pnpm install', 'bun install',
-            'gem install', 'composer install',
-        )
-        persist_signals = ('persist', 'db ', 'database', ' row', 'history', 're-read', 'serialized', 'stored', 'saved')
-        for content in comments:
-            text = (content or '').lower()
-            if heading not in text:
-                continue
-            if any(sig in text for sig in surface_signals) and any(sig in text for sig in persist_signals):
-                return True
-        return False
+        return WorkflowService._live_boundary_gap(comments) is None
 
     @staticmethod
     def _has_linked_pr(item):
