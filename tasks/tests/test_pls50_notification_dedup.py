@@ -110,7 +110,12 @@ class NotificationDedupTests(TestCase):
             # callbacks after this block. They must still be pending here.
             mock_task.delay.assert_not_called()
 
-        self.assertEqual(len(callbacks), 2)
+        # PLAT-10351: the keyed-chain handoff mechanical comment is also a
+        # transaction.on_commit callback, so a live assignee replacement now
+        # defers 3 callbacks (2 send_item_notification + 1 handoff comment).
+        # The wait-for-commit contract under test is unchanged: none of them
+        # may fire while the atomic block is still open.
+        self.assertEqual(len(callbacks), 3)
         events = [entry.args[1] for entry in mock_task.delay.call_args_list]
         self.assertEqual(events, ['status_changed', 'assignment_changed'])
         assignment_context = mock_task.delay.call_args_list[1].args[2]

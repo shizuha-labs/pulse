@@ -478,6 +478,21 @@ def track_item_changes(sender, instance, created, **kwargs):
             # assign(save=False)+later-save caller can't ghost-publish before the
             # source row exists. Best-effort, transaction-after-commit.
             if field == 'assignee_id':
+                previous_email = str(original.get('assignee_email') or '').strip()
+                current_email = str(getattr(instance, 'assignee_email', '') or '').strip()
+                if previous_email and current_email and previous_email.lower() != current_email.lower():
+                    # Run after the assignee write commits. A mechanical-comment
+                    # failure inside this post_save used to poison the caller's
+                    # atomic block (caught Exception still marks the txn broken).
+                    def _keyed_chain_handoff(item=instance, previous=previous_email):
+                        try:
+                            from .services.keyed_chain_handoff import record_keyed_chain_handoff
+                            record_keyed_chain_handoff(item, previous)
+                        except Exception:
+                            logger.exception("PLAT-10351 keyed-chain handoff comment failed")
+
+                    from django.db import transaction
+                    transaction.on_commit(_keyed_chain_handoff)
                 try:
                     from .services import home_activity
                     _asg_actor = (
