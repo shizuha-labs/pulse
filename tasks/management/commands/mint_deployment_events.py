@@ -64,11 +64,15 @@ _PROOF_PATTERNS = {
 }
 
 
-def _http_get(url, token=None, timeout=30):
-    headers = {}
+def _http_get(url, token=None, timeout=30, headers=None):
+    merged = {}
     if token:
-        headers['Authorization'] = f'token {token}'
-    req = urllib.request.Request(url, headers=headers)
+        merged['Authorization'] = f'token {token}'
+    if headers:
+        # Caller-provided headers win (the rollout-proof fetch passes a
+        # scheme-specific Authorization: bearer vs token).
+        merged.update(headers)
+    req = urllib.request.Request(url, headers=merged)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode('utf-8', 'replace')
 
