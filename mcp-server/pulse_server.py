@@ -4306,6 +4306,20 @@ def unlink_pr(item_id: str, pr_url: str, reason: str = "") -> str:
     )
 
 
+def _cite_mint_head(item_id, repo, pr_number, head_sha, previous_head):
+    """PLAT-9838: the link path is the mint. Fence a superseded head, then cite the live one."""
+    if not repo or not pr_number or not head_sha:
+        return
+    from tasks.services.head_mutation_fence import cite_live_head
+    cite_live_head(
+        f"{item_id}:{repo}#{pr_number}",
+        str(repo),
+        int(pr_number),
+        str(head_sha),
+        previous_head=str(previous_head or ""),
+    )
+
+
 @mcp.tool(name="pulse_link_pr")
 def link_pr(item_id: str, pr_url: str, title: Optional[str] = None, repo: Optional[str] = None, pr_number: Optional[int] = None) -> str:
     """
@@ -4656,9 +4670,11 @@ def link_pr(item_id: str, pr_url: str, title: Optional[str] = None, repo: Option
     if existing:
         changed = []
         if head_sha and existing.get('head_sha') != head_sha:
+            previous_head = existing.get('head_sha') or ''
             existing['head_sha'] = head_sha
             existing['last_synced_at'] = _dt.datetime.utcnow().isoformat() + "Z"
             changed.append('head_sha')
+            _cite_mint_head(item_id, repo, pr_number, head_sha, previous_head)
         if merge_commit_sha and existing.get('merge_commit_sha') != merge_commit_sha:
             existing['merge_commit_sha'] = merge_commit_sha
             changed.append('merge_commit_sha')
@@ -4698,6 +4714,7 @@ def link_pr(item_id: str, pr_url: str, title: Optional[str] = None, repo: Option
     if head_sha:
         new_entry["head_sha"] = head_sha
         new_entry["last_synced_at"] = _dt.datetime.utcnow().isoformat() + "Z"
+        _cite_mint_head(item_id, repo, pr_number, head_sha, "")
     if merge_commit_sha:
         new_entry['merge_commit_sha'] = merge_commit_sha
     if merged_at:
