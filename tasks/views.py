@@ -10387,6 +10387,103 @@ def _preserve_focus_refused_body(*, item, author_email, causal_actor, content,
     return preserved
 
 
+_CHASE_MARKER = 'chase'
+
+
+def _comment_is_chase(comment):
+    """A chase is an explicit chase comment, not every comment."""
+    text = (getattr(comment, 'content', '') or '').lower()
+    return text.startswith('chase:') or '\nchase:' in f'\n{text}' or 'auto-chase' in text
+
+
+def _assignee_was_silent(item, since):
+    """Silent means no assignee comment or assignee-attributed PR activity.
+
+    A PR row's updated_at / head_sha_at is not assignee activity. Bot status
+    stamps rewrite those fields with no actor (PLAT-11867 class). Only an
+    ItemActivity row whose actor email is the assignee counts.
+    """
+    from .models import Comment, ItemActivity
+    email = (getattr(item, 'assignee_email', '') or '').strip().lower()
+    if not email:
+        return False
+    comments = Comment.objects.filter(item_id=item.pk, created_at__gt=since)
+    for row in comments.only('author_email', 'content'):
+        if (row.author_email or '').strip().lower() == email and not _comment_is_chase(row):
+            return False
+    activities = ItemActivity.objects.filter(item_id=item.pk, created_at__gt=since)
+    for row in activities.only('user_email', 'action'):
+        if (row.user_email or '').strip().lower() == email:
+            return False
+    return True
+
+
+def _maybe_chase_auto_fallback(item, comment):
+    """PLS-1457: two silent chase rungs reassign once via the team roster.
+
+    The trigger is this comment. No sweep. A comment, transition, or PR
+    event from the assignee resets the count.
+    """
+    if comment is None or not _comment_is_chase(comment):
+        return None
+    from django.utils import timezone
+    from .models import Comment
+    from .services.workflow_service import WorkflowService
+
+    email = (getattr(item, 'assignee_email', '') or '').strip().lower()
+    team = (getattr(item, 'assignment_group', '') or '').strip()
+    if not email or not team:
+        return None
+    prior = (
+        Comment.objects.filter(item_id=item.pk, created_at__lt=comment.created_at)
+        .exclude(pk=comment.pk)
+        .order_by('-created_at')
+    )
+    silent = 0
+    cursor = comment.created_at or timezone.now()
+    for row in prior[:20]:
+        if not _comment_is_chase(row):
+            continue
+        if not _assignee_was_silent(item, row.created_at):
+            break
+        silent += 1
+        cursor = row.created_at
+        # Acceptance is two prior silent chase rungs, not one. Stop once
+        # that count is met; a later non-silent rung already broke above.
+        if silent >= 2:
+            break
+    if silent < 2:
+        return None
+    user_id, next_email = WorkflowService._resolve_team_assignee(
+        team,
+        exclude_email=email,
+        hard_exclude_emails={email},
+        item=item,
+        reserve_capacity=False,
+    )
+    if not next_email or next_email.strip().lower() == email:
+        return None
+    seq = silent + 1
+    item.assignee_email = next_email
+    if user_id:
+        item.assignee_id = user_id
+    item.save(update_fields=['assignee_email', 'assignee_id', 'updated_at'])
+    from .services.mechanical_comments import MechanicalCommentFactory
+    MechanicalCommentFactory.create(
+        item=item,
+        origin_kind=Comment.ORIGIN_WORKFLOW_LIFECYCLE,
+        origin_event='chase.auto_fallback',
+        template_version=1,
+        structured_payload={
+            'seq': str(seq),
+            'from_email': email,
+            'to_email': next_email,
+        },
+        origin_event_id=f'chase-auto-fallback:{item.pk}:{comment.pk}',
+    )
+    return next_email
+
+
 class CommentViewSet(viewsets.ModelViewSet):
     """
     ViewSet for comment management on items.
@@ -10589,6 +10686,13 @@ class CommentViewSet(viewsets.ModelViewSet):
         )
 
         logger.info(f"Comment created on item {item.id} by user {user.id}")
+
+        # PLS-1457: a chase comment is the trigger. Two silent rungs move the
+        # assignee once. Any assignee comment, transition, or PR event resets it.
+        try:
+            _maybe_chase_auto_fallback(item, serializer.instance)
+        except Exception:
+            logger.exception('chase auto-fallback failed on item %s', item.id)
 
         # Send comment notification
         try:

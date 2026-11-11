@@ -735,6 +735,15 @@ _SPECS = (
     # acceptance_mode=live is likely a record deliverable; loud but
     # non-blocking signal at create.
     MechanicalTemplate(
+        Comment.ORIGIN_WORKFLOW_LIFECYCLE, 'chase.auto_fallback', 1,
+        {'seq': str, 'from_email': str, 'to_email': str},
+        {},
+        lambda p: (
+            f"auto-fallback@{p['seq']}: chase rung silent for {p['from_email']}; "
+            f"reassigned to {p['to_email']}."
+        ),
+    ),
+    MechanicalTemplate(
         Comment.ORIGIN_WORKFLOW_LIFECYCLE, 'warning.retro_acceptance_mode_live', 2,
         {'item_key': str, 'result': str, 'filed_acceptance_mode': str,
          'record_class_tag': str, 'detail': str},
