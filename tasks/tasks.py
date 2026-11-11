@@ -3067,14 +3067,48 @@ def _fire_recurring_due_body(item_id, expected_cycle_revision=None,
 
     if result.kind == 'scheduled_start':
         item_key = item.item_key or f'#{item_id}'
+        # PLAT-12610: stable delivery event id for recurrence dedupe. The
+        # cycle event_id from _record_event is authoritative; the composite
+        # fallback is deterministic per (item, generation, due boundary) so a
+        # re-fire of the same boundary cannot produce a second delivery.
+        due_boundary = item.due_date.isoformat() if item.due_date else 'none'
+        delivery_event_id = (
+            result.event_id
+            or f"recurrence:{item.pk}:gen{result.generation}:{due_boundary}"
+        )
         msg_content = (
             f"[Recurring Task Due] {item_key}: {item.title}\n"
             f"Priority: {item.priority} | Frequency: {item.frequency} | "
             f"Next boundary: {result.next_due.isoformat()}\n"
+            f"Event ID: {delivery_event_id} | Due boundary: {due_boundary} | "
+            f"Generation: {result.generation}\n"
             f"{notification_state_line(item)}\n"
             f"Use pulse_get_task(\"{item_key}\") for details. This task was "
             f"previously {result.old_status}; generation {result.generation} is now active."
         )
+        # PLAT-12610: Redis SETNX delivery dedupe (fail-open). If the marker
+        # exists, this boundary was already delivered in a prior fire of the
+        # same generation/boundary — suppress the duplicate.
+        try:
+            from django.core.cache import cache
+            if not cache.add(
+                f"pulse:recurrence:delivered:{delivery_event_id}", "1",
+                7 * 24 * 3600,
+            ):
+                logger.warning(
+                    "fire_recurring_due: suppressed duplicate delivery for "
+                    "%s (event_id=%s already delivered)",
+                    item_id, delivery_event_id,
+                )
+                return (
+                    f"Suppressed duplicate recurring delivery for {item_id} "
+                    f"(event_id={delivery_event_id})"
+                )
+        except Exception as exc:
+            logger.warning(
+                "fire_recurring_due: delivery dedupe store unavailable for %s "
+                "(%s); delivering fail-open", item_id, exc,
+            )
         try:
             from tasks.services.connect_origin import system_message_headers
             connect_url = f"{getattr(settings, 'SHIZUHA_CONNECT_API_URL', 'http://shizuha-connect:8019/api').rstrip('/')}/internal/system-message/"
