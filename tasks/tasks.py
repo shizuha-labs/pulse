@@ -16849,13 +16849,35 @@ def post_weekly_design_review_digest(self):
         return {'posted': False, 'reason': 'no_conversation'}
 
     now = timezone.now()
-    rows = []
-    for it in Item.objects.filter(status='in_review').order_by('updated_at'):
+    entries = []
+    for it in Item.objects.filter(status='in_review'):
         if not WorkflowService._is_design_review_item(it):
             continue
-        age_days = max(0, (now - (it.updated_at or now)).days)
+        # PLAT-10536: 'in review' age must read the transition INTO the review
+        # status, not updated_at — any comment/metadata/field touch resets
+        # updated_at, so the digest showed 0d forever for actively-discussed
+        # reviews (the opposite of what the digest exists to surface). Source
+        # of truth: the latest status_changed ItemActivity into the item's
+        # current status (the same submitter-resolution pattern WorkflowService
+        # uses). Fallback created_at covers items minted directly into the
+        # review lane with no recorded transition. field_name is iexact —
+        # writers use both 'Status' and 'status'.
+        entered_at = None
+        act = (it.activities
+               .filter(action='status_changed', field_name__iexact='status',
+                       new_value__iexact=(it.status or ''))
+               .order_by('-created_at')
+               .first())
+        entered_at = act.created_at if act else None
+        if entered_at is None:
+            entered_at = it.created_at or now
+        age_days = max(0, (now - entered_at).days)
         author = it.assignee_email or it.created_by_email or 'unassigned'
-        rows.append(f'• {it.item_key} — {it.title}  (author: {author}, in review {age_days}d)')
+        entries.append((age_days,
+                        f'• {it.item_key} — {it.title}  (author: {author}, in review {age_days}d)'))
+    # Longest-waiting review first (was: updated_at asc — the same stale signal).
+    entries.sort(key=lambda e: -e[0])
+    rows = [row for _, row in entries]
 
     date_str = now.strftime('%-d %b %Y')
     if rows:
