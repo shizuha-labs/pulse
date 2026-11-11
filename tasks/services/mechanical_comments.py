@@ -296,6 +296,21 @@ _SPECS = (
         ),
     ),
     MechanicalTemplate(
+        Comment.ORIGIN_WORKFLOW_LIFECYCLE, 'assignment.keyed_chain_handoff', 1,
+        {'previous_email': str, 'assignee_email': str, 'chain_position': str,
+         'receipt_hash': str, 'next_action': str, 'status': str}, {},
+        lambda p: (
+            "## Keyed-chain handoff\n"
+            f"- from: `{p['previous_email']}`\n"
+            f"- to: `{p['assignee_email']}`\n"
+            f"- status: `{p['status']}`\n"
+            f"- chain position: `{p['chain_position']}`\n"
+            f"- receipt hash: `{p['receipt_hash']}`\n"
+            f"- next action: {p['next_action']}\n"
+            "Do not re-derive this chain from chat. [PLAT-10351]"
+        ),
+    ),
+    MechanicalTemplate(
         Comment.ORIGIN_WORKFLOW_LIFECYCLE, 'assignment.cleared', 1,
         {'prior_email': str, 'reason': str, 'action': str, 'result_group': str}, {},
         lambda p: (
