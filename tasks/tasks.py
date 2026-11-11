@@ -10167,6 +10167,7 @@ def sweep_agent_availability(self):
                        # reactivate durable stopped rows once the agent is back on.
     hibernated_all = []
     stale_disabled_ignored = []
+    contradicted_disabled_ignored = []  # PLAT-9318: lifecycle=enabled vs file enabled=0
     for m in enabled_rx.finditer(text):
         agent, val = m.group(1), m.group(2)
         email = f"{agent}@shizuha.com".lower()
@@ -10188,6 +10189,20 @@ def sweep_agent_availability(self):
                 disabled.append(email)
             avail[email] = False
             unavailability_reasons[email] = 'disabled'
+            continue
+        # PLAT-9318: the typed lifecycle sample is the seat-status SoT. When it
+        # says 'enabled' while the compatibility-file fold says enabled<1, the
+        # file sample is provably contradicted (stale exporter gather /
+        # not-yet-rewritten status field) — fail OPEN toward available instead
+        # of verdict-disabling a demonstrably live seat (kei/haru misreads
+        # 09-19: heartbeats + merges all session while the clear comments cited
+        # status=disabled, fueling the PLS-524/204 clear -> PLS-188
+        # re-materialize cycle and the CTX-577/626 failover churn). A genuine
+        # operator stop flips the typed lifecycle to operator_stopped, which
+        # still fails closed above; exporters that emit no lifecycle sample
+        # keep the old file-fold behavior (forward-compatible).
+        if lifecycle_state == 'enabled' and float(val) < 1.0:
+            contradicted_disabled_ignored.append(email)
             continue
         if float(val) >= 1.0:
             enabled_ok.append(email)
@@ -10237,6 +10252,12 @@ def sweep_agent_availability(self):
         logger.info(
             "sweep_agent_availability: ignored lifecycle samples older than "
             f"live heartbeat: {sorted(stale_disabled_ignored)}"
+        )
+    if contradicted_disabled_ignored:
+        logger.warning(
+            "sweep_agent_availability: PLAT-9318 ignored file-fold enabled=0 "
+            "contradicted by typed lifecycle=enabled (fail-open, seat live): %s",
+            sorted(contradicted_disabled_ignored),
         )
 
     ttl = int(os.environ.get('PULSE_AVAILABILITY_TTL', '600'))
