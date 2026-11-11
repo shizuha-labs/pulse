@@ -20353,6 +20353,7 @@ class WorkflowService:
             'seat_incapable_substrate': 'seat lacks required runtime-substrate capability (signed Hive evidence)',
             'seat_not_live': 'seat not live for new assignment',
             'no_candidate_evidence': 'no candidate evidence (zero seats scored)',
+            'lane_degraded_alert_firing': 'detective alert firing for target lane/pool (PLAT-13267 placement gate)',
             'resolver_source_unavailable': 'resolver source unavailable',
             'status_role_ineligible': 'seat cannot execute this workflow status',
             'over_capacity': 'seat over WIP/in-flight cap',
@@ -20417,6 +20418,7 @@ class WorkflowService:
         'seat_not_live', 'no_candidate_evidence', 'status_role_ineligible', 'over_capacity',
         'team_human_only',
         'resolver_source_unavailable',
+        'lane_degraded_alert_firing',  # PLAT-13267 placement gate (defer, never terminal)
         'review_sod_author_identity',
         'review_sod_author_evidence_unavailable',
         'merge_sod_author_identity', 'merge_sod_reviewer_identity',
@@ -24339,6 +24341,45 @@ class WorkflowService:
                 (getattr(item, 'status', '') or '').strip().lower(),
             )
             return None, None
+
+        # PLAT-13267 R1/R2 (PLAT-10478 design, sora 2026-11-09): dispatch-time
+        # placement gate. Consult the detective alert set for the target lane
+        # BEFORE seat scoring; on a firing condition defer into the existing
+        # routing-hold machinery (group-queued + backoff re-arm) instead of
+        # placing into a degraded lane. Never terminal: the hold re-fires and
+        # places normally once the alerts clear. Shadow by default
+        # (PULSE_PLACEMENT_GATE_ENFORCE); the read path fails open.
+        try:
+            from .placement_gate import gate_verdict
+            _pinned = []
+            try:
+                _pinned = list(((item.metadata or {}).get('pinned_models') or [])
+                               if item is not None and getattr(item, 'metadata', None) else [])
+            except Exception:
+                _pinned = []
+            _pg = gate_verdict(team=norm, pinned_models=_pinned)
+            if _pg['defer']:
+                _pg_reason = _pg['reason'] or 'lane_degraded_alert_firing'
+                logger.warning(
+                    "PLAT-13267: placement deferred for item %s lane=%s (%s)",
+                    getattr(item, 'item_key', getattr(item, 'pk', '?')),
+                    norm, _pg_reason,
+                )
+                WorkflowService._record_routability_hold(
+                    item, norm, ['lane_degraded_alert_firing'],
+                    source='team-resolver', candidate_reasons=[_pg_reason],
+                )
+                return None, None
+            if _pg['alerts']:
+                # Shadow mode: observe only — placement proceeds, the firing
+                # set is logged for the PLS-374-style bake go/no-go series.
+                logger.info(
+                    "PLAT-13267 shadow: firing alerts at placement for item %s "
+                    "lane=%s: %s", getattr(item, 'item_key', getattr(item, 'pk', '?')),
+                    norm, sorted(_pg['alerts']),
+                )
+        except Exception:
+            logger.exception("PLAT-13267: placement gate failed open for lane %s", norm)
 
         def _available(email):
             if allow_wakeable:
