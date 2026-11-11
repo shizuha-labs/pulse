@@ -8795,6 +8795,30 @@ class GitHubWebhookView(APIView):
                         user_id=0,
                         user_email=actor_email[:254],
                     )
+                    # PLAT-13258: a head move invalidates the official stamp.
+                    # Re-queue the review instead of leaving the old approval
+                    # covering a SHA it never saw. A silent None here was the
+                    # lapse the counter exists to make visible.
+                    if head_changed and new_pr_status == 'open' and item.status == 'in_review':
+                        requeued = Item.objects.filter(
+                            pk=item.pk, status='in_review',
+                        ).update(status='in_progress')
+                        # Count only a row this call actually moved. A
+                        # concurrent writer may have left in_review first.
+                        if requeued:
+                            meta = item.metadata or {}
+                            meta['review_lapse_count'] = int(meta.get('review_lapse_count') or 0) + 1
+                            Item.objects.filter(pk=item.pk).update(metadata=meta)
+                            item.metadata = meta
+                            ItemActivity.objects.create(
+                                item_id=item.pk,
+                                action='status_changed',
+                                field_name='status',
+                                old_value='in_review',
+                                new_value='in_progress',
+                                user_id=0,
+                                user_email='review-requeue@shizuha.local',
+                            )
                 if (
                     new_pr_status == 'merged'
                     and pr_merge_commit_sha
