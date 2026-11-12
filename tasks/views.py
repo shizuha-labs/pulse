@@ -1588,9 +1588,23 @@ class VerificationRequirementManifestViewSet(viewsets.ReadOnlyModelViewSet):
         if not (self.request.user.is_staff or self.request.user.is_superuser):
             visible = PermissionService.get_user_item_queryset(self.request.user).values('pk')
             qs = qs.filter(item_id__in=visible)
-        item_id = self.request.query_params.get('item')
-        if item_id:
-            qs = qs.filter(item_id=item_id)
+        # PLAT-10844: the `item` param must accept BOTH the numeric pk and the
+        # human item key. A string key (e.g. ?item=PLAT-10479) previously hit
+        # the item_id coercion and 500'd the whole read path (the CoS gate
+        # went blind exactly this way during the PLAT-10479 P1 hold).
+        item_param = self.request.query_params.get('item')
+        if item_param:
+            if item_param.isdigit():
+                qs = qs.filter(item_id=int(item_param))
+            else:
+                qs = qs.filter(item__item_key=item_param)
+        # PLAT-10843: verifiers and CI query manifests by the human item key
+        # (e.g. ?item_key=PLAT-9539); without this the param was silently
+        # ignored and the endpoint returned the unfiltered ledger, which read
+        # as a broken read path downstream.
+        item_key = self.request.query_params.get('item_key')
+        if item_key:
+            qs = qs.filter(item__item_key=item_key)
         current = self.request.query_params.get('current')
         if str(current).lower() in {'1', 'true', 'yes'}:
             qs = qs.filter(is_current=True)

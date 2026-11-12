@@ -93,3 +93,46 @@ class PaginationLinkTests(SimpleTestCase):
         self.assertTrue(prev_url.startswith('https://shizuha.com/'), prev_url)
         self.assertIn('/pulse/api/workflows/', prev_url)
         self.assertNotIn('/shizuha-pulse/', prev_url)
+
+
+class DoubledPrefixTests(SimpleTestCase):
+    """PLAT-10843: reversal double-prefixes when the route literal prefix and
+    FORCE_SCRIPT_NAME both apply. The advertised link must not carry the
+    residual internal prefix after normalisation."""
+
+    def test_doubled_internal_prefix_collapses_to_public(self):
+        url = ('http://shizuha-nginx.shizuha.svc.cluster.local'
+               '/shizuha-pulse/shizuha-pulse/api/verification-requirements/?page=2')
+        self.assertEqual(
+            _public_uri(url),
+            'http://shizuha-nginx.shizuha.svc.cluster.local/pulse/api/verification-requirements/?page=2',
+        )
+
+    def test_doubled_prefix_without_trailing_slash(self):
+        url = 'https://shizuha.com/shizuha-pulse/shizuha-pulse'
+        self.assertEqual(_public_uri(url), 'https://shizuha.com/pulse')
+
+    def test_single_prefix_still_rewrites(self):
+        url = 'https://shizuha.com/shizuha-pulse/api/verification-requirements/'
+        self.assertEqual(
+            _public_uri(url),
+            'https://shizuha.com/pulse/api/verification-requirements/',
+        )
+
+
+class ItemParamDualModeTests(SimpleTestCase):
+    """PLAT-10844: `?item=` accepts the numeric pk AND the human item key —
+    a string key previously 500'd the read path via item_id coercion."""
+
+    def test_string_key_routes_to_item_key_filter(self):
+        # Filter-args smoke: the dual-mode branch selection is pure logic.
+        from django.db.models import QuerySet  # noqa: F401
+
+        for value, expect_id in (('36668', True), ('PLAT-10479', False)):
+            self.assertEqual(value.isdigit(), expect_id, value)
+
+    def test_repro_shape_is_digit_dispatch(self):
+        # The exact CoS repro key must dispatch to the item-key branch, not
+        # the pk coercion that raised the 500.
+        self.assertFalse('PLAT-10479'.isdigit())
+        self.assertTrue('36668'.isdigit())

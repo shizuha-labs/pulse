@@ -16,6 +16,16 @@ def _public_uri(url):
         return url
     internal = getattr(settings, 'FORCE_SCRIPT_NAME', '/shizuha-pulse')
     public = getattr(settings, 'PUBLIC_API_PREFIX', '/pulse')
+    # PLAT-10843: routes are registered with the literal `shizuha-pulse/api/`
+    # prefix in taskmanager/urls.py AND FORCE_SCRIPT_NAME prepends the script
+    # name again during reversal, so DRF builds doubled internal prefixes
+    # (/shizuha-pulse/shizuha-pulse/...). Collapse the doubling first, or the
+    # PLS-612 rewrite below fixes only the first occurrence and advertises
+    # /pulse/shizuha-pulse/... which 404s for any client that follows it.
+    if internal and internal + internal + '/' in url:
+        url = url.replace(internal + internal + '/', internal + '/', 1)
+    elif internal and internal + internal in url:
+        url = url.replace(internal + internal, internal, 1)
     if internal and public and internal != public and internal in url:
         url = url.replace(internal, public, 1)
     return url
