@@ -28,6 +28,11 @@ class PackageGuardTests(SimpleTestCase):
         )
         reason = package_of_tasks_reason("Cluster unblock", description)
         self.assertIn("one unit at a time", reason)
+        self.assertIn("Parsed 3 units", reason)
+        self.assertIn("sentence 1", reason)
+        self.assertIn("PLAT-8207", reason)
+        self.assertIn("CTX-923", reason)
+        self.assertIn("PLS-1211", reason)
 
     def test_steps_of_one_job_are_not_a_package(self):
         description = (
