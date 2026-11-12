@@ -26,19 +26,52 @@ _REASON = (
 )
 
 
+def _line_of(description: str, text: str) -> int | None:
+    needle = text.strip()
+    if not needle or not description:
+        return None
+    for index, line in enumerate(description.splitlines(), 1):
+        if needle in line:
+            return index
+    return None
+
+
+def _with_units(units, description: str = "") -> str:
+    """Name the spans the gate actually parsed. Do not invent extra units."""
+    shown = []
+    for index, unit in enumerate(units, 1):
+        text = " ".join(str(unit).split())
+        if len(text) > 120:
+            text = text[:117] + "..."
+        line = _line_of(description, text)
+        label = f"sentence {line}" if line else str(index)
+        shown.append(f"{label} '{text}'")
+    return (
+        f"{_REASON} Parsed {len(shown)} units: " + "; ".join(shown) + "."
+    )
+
+
 def package_of_tasks_reason(title: str, description: str = "") -> str:
     """Return the refusal text when title+description is a package, else ''."""
     title = title or ""
     description = description or ""
-    if _PACKAGE_PHRASE.search(title) or _ITEM_RANGE.search(title):
-        return _REASON
+    phrase = _PACKAGE_PHRASE.search(title)
+    item_range = _ITEM_RANGE.search(title)
+    if phrase or item_range:
+        units = []
+        if phrase:
+            units.append(phrase.group(0))
+        if item_range:
+            units.append(item_range.group(0))
+        return _with_units(units, title)
     headings = _SECTION.findall(description)
     keys = set()
     for heading in headings:
         keys.update(_ITEM_KEY.findall(heading))
     if len(headings) >= 3 and len(keys) >= 3:
-        return _REASON
+        return _with_units(headings, description)
     title_keys = _ITEM_KEY.findall(title)
-    if len(set(title_keys)) >= 2 and " + " in title:
-        return _REASON
+    unique_keys = list(dict.fromkeys(title_keys))
+    if len(unique_keys) >= 2 and " + " in title:
+        return _with_units(unique_keys, title)
     return ""
