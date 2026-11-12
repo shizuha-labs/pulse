@@ -36,6 +36,7 @@ from datetime import timedelta
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
+from tasks.cortex_cost import CortexAuthUnavailable, _exchange_cortex_service_token
 from tasks.models import DeploymentEvent
 from tasks.services.deployment_events import upsert_deployment_event
 
@@ -43,8 +44,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_FORGEJO = os.environ.get(
     'FORGEJO_URL', 'http://forgejo-http.origin.svc.cluster.local:80')
+# PLAT-13473: the CronJob chart sets ORIGIN_CI_LOGS_URL (mio's trace);
+# accept both spellings so the override actually applies.
 DEFAULT_CI_LOGS = os.environ.get(
-    'CI_LOGS_URL', 'http://ci-logs.origin.svc.cluster.local:8080')
+    'ORIGIN_CI_LOGS_URL',
+    os.environ.get('CI_LOGS_URL', 'http://ci-logs.origin.svc.cluster.local:8080'))
 
 # v1 allowlist: fleet repos with an active deploy lane. Extend as repos
 # land deployment workflows (documented on PLAT-12954).
@@ -225,23 +229,38 @@ class Command(BaseCommand):
     def _parse_rollout_proof(self, base, org, repo, run_id):
         """Fetch the run log and parse the rollout proof markers.
 
-        Proof-source order (no new credential — PLAT-12954 trust boundary):
-          1. Forgejo Actions logs API with the inherited FORGEJO_TOKEN
-             (read:repository — the same bytes the ci-logs sidecar mirrors).
-          2. ci-logs sidecar with SHIZUHA_ID_TOKEN, only if configured.
+        Proof-source order (no NEW credential — PLAT-12954 trust boundary;
+        PLAT-13473 fix: sidecar first, bearer minted via the existing
+        Pulse->Shizuha-ID OAuth client the deployment already holds):
+          1. ci-logs sidecar with SHIZUHA_ID_TOKEN if directly configured,
+             else with a bearer minted via tasks.cortex_cost's bounded
+             client_credentials exchange (PULSE_CORTEX_OAUTH_CLIENT_SECRET).
+             The sidecar leg is the one that WORKS on this instance.
+          2. Forgejo Actions logs API with the inherited FORGEJO_TOKEN.
+             KNOWN-DEAD on this Forgejo instance (404 for every run —
+             PLAT-13473); kept as last-resort only so the leg is not
+             silently dropped if the instance gains the endpoint.
         Returns {} on ANY fetch failure (fail-closed).
         """
-        forgejo_token = os.environ.get('FORGEJO_TOKEN', '').strip()
         urls = []
-        if forgejo_token:
-            urls.append((f'{base.rstrip("/")}/api/v1/repos/{org}/{repo}'
-                         f'/actions/tasks/{run_id}/logs', forgejo_token,
-                         'token'))
         sidecar_token = os.environ.get('SHIZUHA_ID_TOKEN', '').strip()
+        if not sidecar_token:
+            try:
+                sidecar_token = _exchange_cortex_service_token()
+                logger.info('minter: minted Shizuha-ID service bearer for '
+                            'ci-logs sidecar leg')
+            except CortexAuthUnavailable as exc:
+                logger.warning('minter: sidecar bearer mint unavailable '
+                               '(fail-closed): %s', exc)
         if sidecar_token:
             urls.append((f'{DEFAULT_CI_LOGS.rstrip("/")}'
                          f'/logs?repo={org}/{repo}&run={run_id}',
                          sidecar_token, 'Bearer'))
+        forgejo_token = os.environ.get('FORGEJO_TOKEN', '').strip()
+        if forgejo_token:
+            urls.append((f'{base.rstrip("/")}/api/v1/repos/{org}/{repo}'
+                         f'/actions/tasks/{run_id}/logs', forgejo_token,
+                         'token'))
         if not urls:
             logger.warning('minter: no log-fetch credential available '
                            '(fail-closed skip)')
