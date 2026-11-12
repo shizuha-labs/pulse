@@ -92,10 +92,32 @@ def _fire_stall_escalation(item, *, seat_available: Optional[bool], reason: str)
     AlertDeduplicationService.submit_alert(data)
 
 
+def _reassign_from_dead_seat(item) -> str:
+    """Return a stranded item to its team queue.
+
+    The resolver then picks the next live member. This probe does not write a
+    concrete assignee. Returns the action taken, or '' when the item has no
+    team to return to.
+    """
+    team = (item.assignment_group or '').strip()
+    if not team:
+        return ''
+    from tasks.services.routing_authority import reroute_assignment_to_group_queue
+
+    # Return the item to its team queue. The resolver picks the next live
+    # member; this probe does not write a concrete assignee itself.
+    reroute_assignment_to_group_queue(
+        item, team, reason='critical_path_stall', save=True,
+    )
+    return f'queued:{team}'
+
+
 def check_critical_path_stalls(*, stall_hours: float | None = None) -> dict:
     """Run the critical-path stall probe.
 
-    Returns ``{"checked": int, "stalled": list[dict], "escalated": int}``.
+    Returns ``{"checked": int, "stalled": list[dict], "escalated": int,
+    "reassigned": int}``. A seat the availability function calls unavailable is
+    not left holding the item: the probe reassigns it.
     """
     threshold = stall_hours if stall_hours is not None else STALL_HOURS
     cutoff = timezone.now() - timedelta(hours=threshold)
@@ -109,6 +131,7 @@ def check_critical_path_stalls(*, stall_hours: float | None = None) -> dict:
 
     checked = 0
     escalated = 0
+    reassigned = 0
     stalled = []
     for item in qs.iterator():
         checked += 1
@@ -121,6 +144,11 @@ def check_critical_path_stalls(*, stall_hours: float | None = None) -> dict:
             reason = 'seat_down_or_saturated'
         elif seat_available is None:
             reason = 'seat_availability_unknown'
+        action = ''
+        if seat_available is False:
+            action = _reassign_from_dead_seat(item)
+            if action:
+                reassigned += 1
         stalled.append({
             'item_key': getattr(item, 'item_key', '') or '',
             'item_id': item.pk,
@@ -128,7 +156,11 @@ def check_critical_path_stalls(*, stall_hours: float | None = None) -> dict:
             'assignee': item.assignee_email or '',
             'seat_available': seat_available,
             'reason': reason,
+            'action': action,
         })
         _fire_stall_escalation(item, seat_available=seat_available, reason=reason)
         escalated += 1
-    return {'checked': checked, 'stalled': stalled, 'escalated': escalated}
+    return {
+        'checked': checked, 'stalled': stalled,
+        'escalated': escalated, 'reassigned': reassigned,
+    }
