@@ -6,7 +6,9 @@ from django.test import TestCase
 from django.utils import timezone
 
 from tasks.models import Item, Project
-from tasks.services.critical_path_stall import check_critical_path_stalls
+from tasks.services.critical_path_stall import (
+    _reassign_from_dead_seat, check_critical_path_stalls,
+)
 
 
 def _make_item(*, priority='urgent', status='todo', updated_hours_ago=2,
@@ -27,11 +29,14 @@ def _make_item(*, priority='urgent', status='todo', updated_hours_ago=2,
 
 
 class CheckCriticalPathStallsTests(TestCase):
+    @mock.patch('tasks.services.critical_path_stall._reassign_from_dead_seat', return_value='queued:engineering')
     @mock.patch('tasks.services.critical_path_stall._seat_available', return_value=False)
     @mock.patch('tasks.services.critical_path_stall._fire_stall_escalation')
-    def test_escalates_stranded_item_on_down_seat(self, mock_fire, mock_seat):
+    def test_escalates_stranded_item_on_down_seat(self, mock_fire, mock_seat, mock_move):
         item = _make_item(updated_hours_ago=2)
         result = check_critical_path_stalls(stall_hours=1)
+        self.assertEqual(result['reassigned'], 1)
+        mock_move.assert_called_once()
         self.assertEqual(result['checked'], 1)
         self.assertEqual(result['escalated'], 1)
         mock_fire.assert_called_once()
@@ -84,3 +89,33 @@ class CheckCriticalPathStallsTests(TestCase):
         result = check_critical_path_stalls(stall_hours=1)
         self.assertEqual(result['checked'], 0)
         mock_fire.assert_not_called()
+
+
+class ReassignFromDeadSeatTests(TestCase):
+    """PLAT-9604 review 7408: the helper itself must be exercised, not stubbed.
+
+    A down seat returns the item to its team queue and never writes a concrete
+    assignee. An item with no team is a no-op.
+    """
+
+    def _item(self, team):
+        proj = Project.objects.create(name='CP Reassign', key='CPR', org_id=1)
+        return Item.objects.create(
+            project=proj, mode='task', status='todo', title='CPR-1',
+            priority='urgent', assignment_group=team,
+        )
+
+    @mock.patch('tasks.services.routing_authority.reroute_assignment_to_group_queue')
+    def test_down_seat_with_team_returns_to_group_queue(self, mock_reroute):
+        item = self._item('engineering')
+        action = _reassign_from_dead_seat(item)
+        self.assertEqual(action, 'queued:engineering')
+        mock_reroute.assert_called_once_with(
+            item, 'engineering', reason='critical_path_stall', save=True,
+        )
+
+    @mock.patch('tasks.services.routing_authority.reroute_assignment_to_group_queue')
+    def test_empty_team_is_a_noop(self, mock_reroute):
+        item = self._item('')
+        self.assertEqual(_reassign_from_dead_seat(item), '')
+        mock_reroute.assert_not_called()
