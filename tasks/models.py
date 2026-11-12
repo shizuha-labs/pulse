@@ -2324,11 +2324,24 @@ class Item(models.Model):
         except Exception:
             canonical_email = None
         if canonical_email and not self._emails_same_identity(canonical_email, email):
+            # PLAT-12619: name BOTH resolved principals in the diagnostic. The
+            # bare "refer to different users" 409 gave the operator nothing to
+            # repair with — 9 recurring charters (EVOL-22 class) sat dead for
+            # months because the error never said which principal each side
+            # resolved to. The structured field→messages map (PLS-859) carries
+            # this straight to the assign 409 body.
             from django.core.exceptions import ValidationError
+            email_uid = self._resolve_user_ref(email)[0] if email else None
             raise ValidationError({
                 f'{field}_email': (
-                    f'{field}_id and {field}_email refer to different users; '
-                    'derive both fields from the same identity source.'
+                    f'{field}_id and {field}_email refer to different users: '
+                    f'{field}_id={uid} resolves to canonical email '
+                    f"'{canonical_email}' while {field}_email='{email}' "
+                    f'(resolves to user id={email_uid}). '
+                    'derive both fields from the same identity source — set '
+                    f'{field}_id to the id of the principal named by '
+                    f"{field}_email (or rewrite {field}_email to "
+                    f"'{canonical_email}')."
                 )
             })
 
