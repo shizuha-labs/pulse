@@ -21,10 +21,20 @@ EXPECTED_TEAM_ROSTER_MEMBERS = {
         'kei@shizuha.com',
         'ryo@shizuha.com',
     }),
+    # PLS-1307: the admin-ops lane's routing floor. The compat row was found
+    # projecting a stale retirement-timestamp snapshot (a phantom disabled
+    # identity as the only member) while the real Admin Ops team's live
+    # routing seat is goro. Pinning the floor here makes any future shrinkage
+    # of the live routing seat fail loudly in CI and the live-read command
+    # instead of silently starving the admin-ops capacity queue again.
+    'shizuha:admin-ops': frozenset({
+        'goro@shizuha.com',
+    }),
 }
 
 EXPECTED_TEAM_ROSTER_ORGANIZATION_IDS = {
     'shizuha:merge': 1,
+    'shizuha:admin-ops': 1,
 }
 
 
