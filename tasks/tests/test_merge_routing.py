@@ -133,10 +133,25 @@ class MergeRosterDriftGuardTests(TestCase):
         )
         output = StringIO()
         call_command('check_team_roster_drift', stdout=output)
-        payload = json.loads(output.getvalue().splitlines()[0])
+        # PLS-1307: the command emits one payload per pinned key (sorted), so
+        # select this test's row by canonical_key instead of line position.
+        payloads = [
+            json.loads(line)
+            for line in output.getvalue().splitlines()
+            if line.startswith('{')
+        ]
+        payload = next(
+            p for p in payloads if p['canonical_key'] == self.canonical_key
+        )
         self.assertEqual(payload['canonical_key'], self.canonical_key)
         self.assertEqual(payload['source'], 'team_roster_compat')
         self.assertEqual(payload['status'], 'ok')
+        # The admin-ops floor row must also read ok through the same live path.
+        admin_ops = next(
+            p for p in payloads if p['canonical_key'] == 'shizuha:admin-ops'
+        )
+        self.assertEqual(admin_ops['status'], 'ok')
+        self.assertEqual(admin_ops['actual'], ['goro@shizuha.com'])
 
     def test_live_read_command_fails_when_required_seat_is_removed(self):
         roster = TeamRoster.objects.get(

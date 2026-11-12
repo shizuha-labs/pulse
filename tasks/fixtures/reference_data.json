@@ -9875,10 +9875,7 @@
    "organization_id": 1,
    "tiers": [
     [
-     "shizuha@shizuha.com"
-    ],
-    [
-     "shion@shizuha.com"
+     "goro@shizuha.com"
     ]
    ],
    "junior_emails": [],
@@ -9887,9 +9884,9 @@
    "ready_wip_cap": 5,
    "active_wip_cap": 0,
    "is_active": true,
-   "note": "Seeded from _POD_ROSTER by migration 0055",
-   "updated_at": "2026-08-06T12:50:19.260Z",
-   "updated_by": "org-isolation-migration"
+   "note": "PLS-1307: aligned to the pinned routing floor — the live Admin Ops (team 12) routing seat is goro (routing=true); the pre-08-14 snapshot members (the shizuha@shizuha.com service identity + the phantom shion@shizuha.com, excluded per removal grant #582) projected the retired Marketing-team era",
+   "updated_at": "2026-09-19T22:40:00.000Z",
+   "updated_by": "pls1307-roster-floor"
   }
  },
  {
