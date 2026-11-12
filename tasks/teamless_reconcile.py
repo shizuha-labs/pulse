@@ -96,9 +96,21 @@ def reconcile_teamless_items(*, dry_run: bool = False) -> dict:
         gauge[priority] = gauge.get(priority, 0) + 1
 
         derived = None
+        derivation_trace = None
         if resolver is not None:
             try:
-                derived = resolver._derive_owner_team(item)
+                if hasattr(resolver, '_derive_owner_team_trace'):
+                    result = resolver._derive_owner_team_trace(item)
+                    # Strict shape guard: a resolver whose trace API is broken
+                    # (wrong arity, Mock, subclass drift) must fall back to the
+                    # plain derivation instead of crashing into the parked
+                    # lane (premerge run on pulse#983 caught this).
+                    if isinstance(result, tuple) and len(result) == 2:
+                        derived, derivation_trace = result
+                    else:
+                        derived = resolver._derive_owner_team(item)
+                else:
+                    derived = resolver._derive_owner_team(item)
             except Exception:
                 logger.exception(
                     "PLAT-11174 reconcile: derivation error for %s — treated as parked",
@@ -132,10 +144,33 @@ def reconcile_teamless_items(*, dry_run: bool = False) -> dict:
         else:
             parked += 1
             parked_keys.append(getattr(item, 'item_key', getattr(item, 'pk', '?')))
+            # PLAT-11174 (QA box-4 fix): a parked row must say WHY — record
+            # the per-signal derivation trace so the next sweep (or a human
+            # triage) can see which signal was absent instead of a bare
+            # "not derivable". Only when a real trace exists: the degraded
+            # lane (resolver down / derivation raised) stays read-only —
+            # stamping "resolver unavailable" onto rows would be provenance
+            # noise, not evidence.
+            if not dry_run and derivation_trace:
+                meta = dict(getattr(item, 'metadata', None) or {})
+                meta[TEAMLESS_FLAG] = {
+                    'action': 'parked',
+                    'derivation_trace': derivation_trace,
+                    'at': timezone.now().isoformat(),
+                }
+                item.metadata = meta
+                try:
+                    item.save(update_fields=['metadata'])
+                except Exception:
+                    logger.exception(
+                        "PLAT-11174 reconcile: park-provenance save failed for %s",
+                        getattr(item, 'item_key', getattr(item, 'pk', '?')),
+                    )
             logger.error(
                 "PLAT-11174 teamless demand PARKED (not derivable — drain still "
-                "cannot place it; needs a named team): %s priority=%s",
+                "cannot place it; needs a named team): %s priority=%s trace=%s",
                 getattr(item, 'item_key', getattr(item, 'pk', '?')), priority,
+                derivation_trace,
             )
 
     summary = {
