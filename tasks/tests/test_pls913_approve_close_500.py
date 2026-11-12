@@ -104,12 +104,16 @@ class Pls913ApproveClose500Tests(TestCase):
                 defaults={'position': position},
             )
         # The exact "Approve & Close (no PR / docs)" transition from migration 0067.
+        # Key on NAME: PLAT-13196 (0204) adds "Verified Present — Close" rows with
+        # the same (workflow, from_status, to_status) triple, and a triple-keyed
+        # get_or_create would find that row first and silently skip seeding this
+        # lane (its defaults, including the name, are ignored on a hit).
         WorkflowTransition.objects.get_or_create(
             workflow=workflow,
+            name='Approve & Close (no PR / docs)',
             from_status='in_review',
             to_status='done',
             defaults={
-                'name': 'Approve & Close (no PR / docs)',
                 'position': 33,
                 'button_style': 'primary',
                 'post_functions': [
@@ -223,6 +227,7 @@ class Pls913ApproveClose500Tests(TestCase):
 
         transition = WorkflowTransition.objects.get(
             workflow__slug='autonomous-bug',
+            name='Approve & Close (no PR / docs)',
             from_status='in_review',
             to_status='done',
         )
@@ -271,6 +276,7 @@ class Pls913ApproveClose500Tests(TestCase):
 
         transition = WorkflowTransition.objects.get(
             workflow__slug='autonomous-bug',
+            name='Approve & Close (no PR / docs)',
             from_status='in_review',
             to_status='done',
         )
@@ -302,6 +308,7 @@ class Pls913ApproveClose500Tests(TestCase):
         self._deploy_event(item)
         transition = WorkflowTransition.objects.get(
             workflow__slug='autonomous-bug',
+            name='Approve & Close (no PR / docs)',
             from_status='in_review',
             to_status='done',
         )
@@ -333,6 +340,7 @@ class Pls913ApproveClose500Tests(TestCase):
         )
         transition = WorkflowTransition.objects.get(
             workflow__slug='autonomous-bug',
+            name='Approve & Close (no PR / docs)',
             from_status='in_review',
             to_status='done',
         )
@@ -361,6 +369,7 @@ class Pls913ApproveClose500Tests(TestCase):
         )
         transition = WorkflowTransition.objects.get(
             workflow__slug='autonomous-bug',
+            name='Approve & Close (no PR / docs)',
             from_status='in_review',
             to_status='done',
         )

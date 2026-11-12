@@ -57,12 +57,15 @@ from tasks.models import (
 # PLAT-9681 (0185): fleet-wide terminal reopen — Reopen edge from every
 # terminal status across the 8 seeded workflows (bespoke-covered terminals
 # skipped, self-reopen targets skipped) — workflowtransition +20 → 283.
+# PLAT-13196 (0204): autonomous-bug verification-only terminal close —
+# "Verified Present — Close" from todo/in_progress/in_review —
+# workflowtransition +3 → 286.
 EXPECTED_COUNTS = {
     'status': 33,
     'resolution': 14,
     'workflow': 8,
     'workflowstatus': 100,
-    'workflowtransition': 283,
+    'workflowtransition': 286,
     'workflowscheme': 1,
     'workflowschememapping': 3,
     'issuetype': 7,

@@ -15124,5 +15124,149 @@
    "created_at": "2026-09-22T00:00:00.000Z",
    "updated_at": "2026-09-22T00:00:00.000Z"
   }
+ },
+ {
+  "model": "tasks.workflowtransition",
+  "fields": {
+   "workflow": [
+    "autonomous-bug"
+   ],
+   "name": "Verified Present \u2014 Close",
+   "description": "Verification-only terminal close (PLAT-13196): work checked and found already present/conformant on the live system \u2014 no repair, no PR, none implied. Comment must carry the verification evidence and verifier identity. Repair work closes via the PLS-493 audited-repair lane, never here.",
+   "from_status": "todo",
+   "to_status": "done",
+   "conditions": null,
+   "allowed_roles": [],
+   "assignee_only": false,
+   "reporter_only": false,
+   "required_fields": [],
+   "validators": [
+    {
+     "type": "field_required",
+     "field": "comment",
+     "message": "Verified Present close requires verification evidence in the comment: what was checked, the pre-existing state observed, and the verifier identity/receipt (PLAT-13196)."
+    }
+   ],
+   "post_functions": [
+    {
+     "type": "send_notification",
+     "template": "status_changed",
+     "recipients": [
+      "assignee",
+      "reporter",
+      "watchers"
+     ]
+    }
+   ],
+   "screen_fields": [],
+   "knowledge_articles": [
+    {
+     "type": "inline",
+     "title": "Verified Present \u2014 Close (PLAT-13196)",
+     "content": "Verification-only terminal close: the work was checked and found ALREADY present/conformant on the live system \u2014 no repair was made, no PR exists, and none is implied. The closing comment MUST carry the verification evidence: exactly what was checked, the pre-existing state observed (receipts, can-i output, config read), and the verifier identity. This lane asserts pre-existing state; it NEVER asserts repair provenance \u2014 a card that produced a repair must close through the PLS-493 audited-repair lane instead. Misusing this lane for repair work is the provenance-fabrication class the repair contract exists to prevent."
+    }
+   ],
+   "position": 40,
+   "button_style": "success",
+   "is_global": false,
+   "created_at": "2026-11-12T00:00:00.000Z",
+   "updated_at": "2026-11-12T00:00:00.000Z"
+  }
+ },
+ {
+  "model": "tasks.workflowtransition",
+  "fields": {
+   "workflow": [
+    "autonomous-bug"
+   ],
+   "name": "Verified Present \u2014 Close",
+   "description": "Verification-only terminal close (PLAT-13196): work checked and found already present/conformant on the live system \u2014 no repair, no PR, none implied. Comment must carry the verification evidence and verifier identity. Repair work closes via the PLS-493 audited-repair lane, never here.",
+   "from_status": "in_progress",
+   "to_status": "done",
+   "conditions": null,
+   "allowed_roles": [],
+   "assignee_only": false,
+   "reporter_only": false,
+   "required_fields": [],
+   "validators": [
+    {
+     "type": "field_required",
+     "field": "comment",
+     "message": "Verified Present close requires verification evidence in the comment: what was checked, the pre-existing state observed, and the verifier identity/receipt (PLAT-13196)."
+    }
+   ],
+   "post_functions": [
+    {
+     "type": "send_notification",
+     "template": "status_changed",
+     "recipients": [
+      "assignee",
+      "reporter",
+      "watchers"
+     ]
+    }
+   ],
+   "screen_fields": [],
+   "knowledge_articles": [
+    {
+     "type": "inline",
+     "title": "Verified Present \u2014 Close (PLAT-13196)",
+     "content": "Verification-only terminal close: the work was checked and found ALREADY present/conformant on the live system \u2014 no repair was made, no PR exists, and none is implied. The closing comment MUST carry the verification evidence: exactly what was checked, the pre-existing state observed (receipts, can-i output, config read), and the verifier identity. This lane asserts pre-existing state; it NEVER asserts repair provenance \u2014 a card that produced a repair must close through the PLS-493 audited-repair lane instead. Misusing this lane for repair work is the provenance-fabrication class the repair contract exists to prevent."
+    }
+   ],
+   "position": 41,
+   "button_style": "success",
+   "is_global": false,
+   "created_at": "2026-11-12T00:00:00.000Z",
+   "updated_at": "2026-11-12T00:00:00.000Z"
+  }
+ },
+ {
+  "model": "tasks.workflowtransition",
+  "fields": {
+   "workflow": [
+    "autonomous-bug"
+   ],
+   "name": "Verified Present \u2014 Close",
+   "description": "Verification-only terminal close (PLAT-13196): work checked and found already present/conformant on the live system \u2014 no repair, no PR, none implied. Comment must carry the verification evidence and verifier identity. Repair work closes via the PLS-493 audited-repair lane, never here.",
+   "from_status": "in_review",
+   "to_status": "done",
+   "conditions": null,
+   "allowed_roles": [],
+   "assignee_only": false,
+   "reporter_only": false,
+   "required_fields": [],
+   "validators": [
+    {
+     "type": "field_required",
+     "field": "comment",
+     "message": "Verified Present close requires verification evidence in the comment: what was checked, the pre-existing state observed, and the verifier identity/receipt (PLAT-13196)."
+    }
+   ],
+   "post_functions": [
+    {
+     "type": "send_notification",
+     "template": "status_changed",
+     "recipients": [
+      "assignee",
+      "reporter",
+      "watchers"
+     ]
+    }
+   ],
+   "screen_fields": [],
+   "knowledge_articles": [
+    {
+     "type": "inline",
+     "title": "Verified Present \u2014 Close (PLAT-13196)",
+     "content": "Verification-only terminal close: the work was checked and found ALREADY present/conformant on the live system \u2014 no repair was made, no PR exists, and none is implied. The closing comment MUST carry the verification evidence: exactly what was checked, the pre-existing state observed (receipts, can-i output, config read), and the verifier identity. This lane asserts pre-existing state; it NEVER asserts repair provenance \u2014 a card that produced a repair must close through the PLS-493 audited-repair lane instead. Misusing this lane for repair work is the provenance-fabrication class the repair contract exists to prevent."
+    }
+   ],
+   "position": 42,
+   "button_style": "success",
+   "is_global": false,
+   "created_at": "2026-11-12T00:00:00.000Z",
+   "updated_at": "2026-11-12T00:00:00.000Z"
+  }
  }
 ]

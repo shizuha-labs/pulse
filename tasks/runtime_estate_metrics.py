@@ -15,6 +15,15 @@ convergent discriminator surface:
 - ``pulse_agent_runtime_estate_blind`` — ``1`` when the estate probe itself
   fails, so a blind gauge is distinguishable from a healthy roster (same
   blindness convention as ``pulse_broker_redis_error``).
+- ``pulse_agent_runtime_estate_reason{principal,reason}`` — ``1`` with the
+  unavailability sidecar's own reason for DOWN/BACKOFF principals
+  (PLAT-13157 discriminator): ``hibernated`` / ``disabled`` /
+  ``force_parked`` are deliberate lifecycle parks (slot-rotation deferral,
+  operator toggle, env force-park), while ``offline`` / ``provider_down`` /
+  ``wedged`` are genuine availability lapses. OK principals get no reason
+  series. Consumed by the AgentRuntimeEstateSingleDown alert rule to
+  exclude deliberately-parked seats instead of paging them as binding
+  lapses.
 
 Roster is discovered from the durable planes themselves (unavailability-reason
 sidecar keys + heartbeat marker keys); no hardcoded usernames. Read-only by
@@ -54,12 +63,15 @@ def _scan_keys(redis_client, pattern):
 
 
 def collect_agent_runtime_estate_metrics(redis_client=None):
-    """Return (estate: dict principal->int, blind: bool) for the estate gauge.
+    """Return (estate, blind, reasons) for the estate gauge + reason metric.
 
     - ``pulse:agent_hb:<alias>`` present (any TTL state) = the identity
       committed an authenticated request recently -> OK; if it ALSO appears in
       the unavailability-reason sidecar, the runtime is cooling down -> BACKOFF.
     - Sidecar-only principals (published unavailable, heartbeat expired) = DOWN.
+    - ``reasons`` carries the sidecar's own per-principal reason string for
+      DOWN/BACKOFF principals (PLAT-13157 discriminator — deliberate park vs
+      genuine lapse); OK principals have no entry.
     """
     from .services.workflow_service import WorkflowService
 
@@ -70,26 +82,30 @@ def collect_agent_runtime_estate_metrics(redis_client=None):
         sidecar = json.loads(raw) if raw else {}
     except Exception:
         logger.warning("runtime estate reason sidecar read failed", exc_info=True)
-        return {}, True
+        return {}, True, {}
     if not isinstance(sidecar, dict):
         sidecar = {}
 
     hb_keys = _scan_keys(redis_client, 'pulse:agent_hb:*')
     if hb_keys is None:
-        return {}, True
+        return {}, True, {}
 
     estate: dict[str, int] = {}
+    reasons: dict[str, str] = {}
     for principal in sidecar:
         p = str(principal).strip().lower()
         if not p:
             continue
         held = any(f'pulse:agent_hb:{alias}' in hb_keys for alias in _aliases(p))
         estate[p] = ESTATE_BACKOFF if held else ESTATE_DOWN
+        reason = str(sidecar.get(principal) or '').strip().lower()
+        if reason:
+            reasons[p] = reason
     for key in hb_keys:
         alias = key.removeprefix('pulse:agent_hb:')
         if not any(alias in _aliases(p) for p in estate):
             estate[alias] = ESTATE_OK
-    return estate, False
+    return estate, False, reasons
 
 
 def _aliases(principal):
@@ -108,7 +124,7 @@ def _aliases(principal):
 
 def render_agent_runtime_estate_metrics() -> str:
     try:
-        estate, blind = collect_agent_runtime_estate_metrics()
+        estate, blind, reasons = collect_agent_runtime_estate_metrics()
     except Exception:
         logger.warning("agent runtime estate metrics collection failed", exc_info=True)
         return 'pulse_agent_runtime_estate_blind 1\n'
@@ -118,5 +134,16 @@ def render_agent_runtime_estate_metrics() -> str:
     for principal in sorted(principal for principal in estate):
         label = principal.replace('"', '')
         lines.append(f'pulse_agent_runtime_estate{{principal="{label}"}} {estate[principal]}')
+    # PLAT-13157: expose the sidecar's own reason so alert rules can tell a
+    # deliberate park (hibernated/disabled/force_parked — slot-rotation
+    # deferral, operator toggle, env force-park) from a genuine availability
+    # lapse (offline/provider_down/wedged). Reason strings are code-vocabulary
+    # (lowercase ascii); belt-and-braces sanitize for label safety anyway.
+    for principal in sorted(reasons):
+        label = principal.replace('"', '')
+        reason = reasons[principal].replace('"', '').replace('\\', '')
+        lines.append(
+            f'pulse_agent_runtime_estate_reason{{principal="{label}",reason="{reason}"}} 1'
+        )
     lines.append('pulse_agent_runtime_estate_blind 0')
     return '\n'.join(lines) + '\n'
