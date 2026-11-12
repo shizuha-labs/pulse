@@ -65,15 +65,45 @@ class TeamlessReconcileUnitTests(unittest.TestCase):
         item._state.adding = False
         item.save = MagicMock()
 
+        # PLAT-11174 box-4 contract (pulse#983): a parked row carries the
+        # per-signal derivation trace as provenance, but the group itself is
+        # NEVER invented — assignment_group stays None and the ledger records
+        # action='parked', not a resolution.
+        trace = [
+            'project-override: absent',
+            'workflow-hint: none for simple',
+            'project-key hint: no mapping for MAIL',
+            'tag-hint: absent',
+        ]
+        with patch.object(tr, 'teamless_active_qs', return_value=_FakeQS([item])), \
+             patch('tasks.services.workflow_service.WorkflowService', MagicMock(
+                 _derive_owner_team_trace=MagicMock(return_value=(None, trace)))):
+            summary = tr.reconcile_teamless_items(dry_run=False)
+
+        self.assertEqual(summary['parked'], 1)
+        self.assertEqual(summary['backfilled'], 0)
+        self.assertIsNone(item.assignment_group)
+        ledger = item.metadata.get(tr.TEAMLESS_FLAG, {})
+        self.assertEqual(ledger.get('action'), 'parked')
+        self.assertEqual(ledger.get('derivation_trace'), trace)
+        item.save.assert_called_once()
+
+    def test_parked_degraded_lane_stays_readonly(self):
+        # Resolver unusable (broken trace API falling back to a plain mock) or
+        # derivation raising: no provenance write — degraded sweeps must not
+        # stamp rows with noise masquerading as evidence.
+        item = self._item('DRV-199', priority='urgent')
+        item._state.adding = False
+        item.save = MagicMock()
+
         with patch.object(tr, 'teamless_active_qs', return_value=_FakeQS([item])), \
              patch('tasks.services.workflow_service.WorkflowService', MagicMock(
                  _derive_owner_team=MagicMock(return_value=None))):
             summary = tr.reconcile_teamless_items(dry_run=False)
 
         self.assertEqual(summary['parked'], 1)
-        self.assertEqual(summary['backfilled'], 0)
         self.assertIsNone(item.assignment_group)
-        self.assertEqual(item.metadata, {})   # nothing ledgered as resolved
+        self.assertEqual(item.metadata, {})   # degraded lane: nothing ledgered
         item.save.assert_not_called()
 
     def test_dry_run_scans_without_writing(self):

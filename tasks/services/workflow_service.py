@@ -13269,6 +13269,10 @@ class WorkflowService:
         'HIVE': 'hive',
         'QNT': 'quant',
         'INV': 'inventory',
+        # PLAT-11174 (mika's 37-parked audit): these two mint keys were absent,
+        # so PLS-*/BRW-* items parked as teamless despite an obvious owner.
+        'PLS': 'pulse',
+        'BRW': 'browser',
     }
 
     # PLS-933: workflow → owning-team hints (validated exact-org on use).
@@ -13279,6 +13283,21 @@ class WorkflowService:
     @staticmethod
     def _derive_owner_team(item) -> str | None:
         """PLS-933: resolve the TRUE owning team from per-item signals.
+
+        Thin wrapper over ``_derive_owner_team_trace`` (PLAT-11174): returns
+        just the team so existing callers are unchanged.
+        """
+        return WorkflowService._derive_owner_team_trace(item)[0]
+
+    @staticmethod
+    def _derive_owner_team_trace(item) -> tuple[str | None, list[str]]:
+        """Resolve the TRUE owning team from per-item signals, with a trace.
+
+        Returns ``(team, trace)``: ``team`` as ``_derive_owner_team`` documents
+        below; ``trace`` is a list of ``"<signal>: <outcome>"`` strings — one
+        per signal consulted — so the teamless reconcile sweep can record on
+        the item WHY nothing derived (PLAT-11174: parked rows must say which
+        of the four signals was absent, not just "not derivable").
 
         Order (strongest first, each candidate exact-org validated):
           1. ``project.settings.default_implementer_group`` (authoritative override)
@@ -13292,6 +13311,7 @@ class WorkflowService:
         finance/drive/wiki/security item no longer blind-stamps engineering.
         """
         project = getattr(item, 'project', None)
+        trace: list[str] = []
 
         def _accepted(candidate):
             if not candidate:
@@ -13300,12 +13320,18 @@ class WorkflowService:
 
         if project is not None:
             psettings = getattr(project, 'settings', None)
+            override = ''
             if isinstance(psettings, dict):
                 override = (psettings.get('default_implementer_group') or '').strip()
-                if override:
-                    accepted = _accepted(override)
-                    if accepted:
-                        return accepted
+            if override:
+                accepted = _accepted(override)
+                if accepted:
+                    return accepted, trace + [f'project-override: accepted {accepted}']
+                trace.append(f'project-override: {override} rejected exact-org')
+            else:
+                trace.append('project-override: absent')
+        else:
+            trace.append('project-override: no project')
 
         raw_wf = (getattr(item, 'workflow_name', None) or '').strip()
         if raw_wf:
@@ -13324,16 +13350,25 @@ class WorkflowService:
             if hint:
                 accepted = _accepted(hint)
                 if accepted:
-                    return accepted
+                    return accepted, trace + [f'workflow-hint: accepted {accepted}']
+                trace.append(f'workflow-hint: {wf_slug} -> {hint} rejected exact-org')
+            else:
+                trace.append(f'workflow-hint: none for {wf_slug}')
+        else:
+            trace.append('workflow-hint: no workflow name')
 
         if project is not None and getattr(project, 'key', None):
-            hint = WorkflowService._PROJECT_KEY_OWNER_TEAMS.get(
-                str(project.key).strip().upper(),
-            )
+            key = str(project.key).strip().upper()
+            hint = WorkflowService._PROJECT_KEY_OWNER_TEAMS.get(key)
             if hint:
                 accepted = _accepted(hint)
                 if accepted:
-                    return accepted
+                    return accepted, trace + [f'project-key: {key} accepted {accepted}']
+                trace.append(f'project-key: {key} -> {hint} rejected exact-org')
+            else:
+                trace.append(f'project-key: no hint for {key}')
+        else:
+            trace.append('project-key: no project key')
 
         tags = (getattr(item, 'tags', '') or '').strip()
         if tags:
@@ -13346,8 +13381,9 @@ class WorkflowService:
                 if token in WorkflowService._known_team_names():
                     accepted = _accepted(token)
                     if accepted:
-                        return accepted
-        return None
+                        return accepted, trace + [f'tag-hint: accepted {accepted}']
+        trace.append('tag-hint: none')
+        return None, trace
 
     @staticmethod
     def _workflow_default_implementer_group(item):
