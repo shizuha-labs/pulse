@@ -253,8 +253,15 @@ class Command(BaseCommand):
                 logger.warning('minter: sidecar bearer mint unavailable '
                                '(fail-closed): %s', exc)
         if sidecar_token:
-            urls.append((f'{DEFAULT_CI_LOGS.rstrip("/")}'
-                         f'/logs?repo={org}/{repo}&run={run_id}',
+            # ORIGIN_CI_LOGS_URL already ends in /logs (the CronJob chart
+            # sets http://ci-logs.origin.svc.cluster.local:8080/logs).
+            # Appending /logs again doubled the path and the sidecar 404s
+            # every run (probed 2026-11-13: /logs -> 401, /logs/logs -> 404),
+            # so the PLAT-13473 sidecar leg never returned a log.
+            base_logs = DEFAULT_CI_LOGS.rstrip('/')
+            if not base_logs.endswith('/logs'):
+                base_logs += '/logs'
+            urls.append((f'{base_logs}?repo={org}/{repo}&run={run_id}',
                          sidecar_token, 'Bearer'))
         forgejo_token = os.environ.get('FORGEJO_TOKEN', '').strip()
         if forgejo_token:
