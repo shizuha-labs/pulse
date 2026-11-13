@@ -386,6 +386,128 @@ class RecurringInvariantMetricsTests(TestCase):
             text,
         )
 
+    # ── PLS-1345 scope extension: the andon item series ──────────────────
+
+    def _andon_metadata(self, team='devops'):
+        """Cycle-state shape recurring_cycle_state writes on retry exhaustion
+        (``assignment_andon_at`` marker + ``assignment_wait_team``)."""
+        return {
+            'recurring_cycle': {
+                'assignment_andon_at': self.now.isoformat(),
+                'assignment_wait_team': team,
+            },
+        }
+
+    def test_labeled_andon_series_names_each_item_and_team_cluster(self):
+        """PLS-1345 scope extension: the labeled per-item andon series must
+        name culprits AND their owner-team clusters.
+
+        PulseRecurringAssignmentAndon fired with a scalar-only gauge (no
+        team/kind labels) and the REST list ignores recurring filters from
+        every seat (ichi's 09-24 cluster read) — the backlog could not be
+        decomposed from any surface. The exposition must carry
+        ``pulse_recurring_assignment_andon_item{item_key, organization_id,
+        assignment_group, team, kind}`` with one sample per andon item, where
+        ``team`` is the cycle-state wait team an on-call routes to.
+        """
+        from tasks.models import Project
+
+        project = Project.objects.create(name='Andon Org', key='PLS2', org_id=1)
+        waiting_devops = self._item(
+            'andon waiting devops', assignee_id=None, assignee_email='',
+            assignment_group='devops', due_date=self.now - timedelta(days=1),
+            metadata=self._andon_metadata(team='devops'),
+        )
+        waiting_qa = self._item(
+            'andon waiting qa', assignee_id=None, assignee_email='',
+            assignment_group='qa', due_date=self.now - timedelta(days=1),
+            metadata=self._andon_metadata(team='qa'),
+        )
+        org_scoped_andon = self._item(
+            'org-scoped andon',
+            # No assignee: on a migrated DB the seeded roster authorizes the
+            # default seat, but this fixture stays valid without it — the
+            # active filter accepts owner-team metadata routing.
+            assignee_id=None, assignee_email='', assignment_group='',
+            due_date=self.now - timedelta(days=1),
+            project=project,
+            metadata={
+                'recurring_owner_team': 'devops',
+                **self._andon_metadata(team='devops'),
+            },
+        )
+        healthy = self._item('healthy', due_date=self.now + timedelta(hours=1))
+
+        metrics = collect_recurring_invariant_metrics(redis_client=_FakeRedis(), now=self.now)
+
+        self.assertEqual(metrics.assignment_andon, 3)
+        self.assertEqual(
+            {(ref.item_key, ref.team, ref.kind)
+             for ref in metrics.assignment_andon_items},
+            {(str(waiting_devops.pk), 'devops', 'assignment_andon'),
+             (str(waiting_qa.pk), 'qa', 'assignment_andon'),
+             (str(org_scoped_andon.item_key or org_scoped_andon.pk), 'devops', 'assignment_andon')},
+        )
+
+        text = render_prometheus_metrics(metrics)
+        self.assertIn(
+            f'pulse_recurring_assignment_andon_item{{item_key="{waiting_devops.pk}"'
+            ',organization_id=""'
+            ',assignment_group="devops"'
+            ',team="devops"'
+            ',kind="assignment_andon"} 1',
+            text,
+        )
+        self.assertIn(
+            f'pulse_recurring_assignment_andon_item{{item_key="{waiting_qa.pk}"'
+            ',organization_id=""'
+            ',assignment_group="qa"'
+            ',team="qa"'
+            ',kind="assignment_andon"} 1',
+            text,
+        )
+        self.assertIn(
+            f'pulse_recurring_assignment_andon_item{{item_key="{org_scoped_andon.item_key or org_scoped_andon.pk}"'
+            ',organization_id="1"'
+            ',assignment_group=""'
+            ',team="devops"'
+            ',kind="assignment_andon"} 1',
+            text,
+        )
+        self.assertNotIn(f'item_key="{healthy.item_key}"', text)
+        # The scalar stays the count of record and matches sample count.
+        self.assertIn('pulse_recurring_assignment_andon 3', text)
+        self.assertEqual(text.count('\npulse_recurring_assignment_andon_item{'), 3)
+
+    def test_labeled_andon_series_team_falls_back_to_assignment_group(self):
+        """Cycle state without ``assignment_wait_team`` falls back to the
+        row's assignment group — the on-call still gets a routable cluster."""
+        self._item(
+            'andon no wait team', assignee_id=None, assignee_email='',
+            assignment_group='engineering', due_date=self.now - timedelta(days=1),
+            metadata={'recurring_cycle': {'assignment_andon_at': self.now.isoformat()}},
+        )
+        metrics = collect_recurring_invariant_metrics(redis_client=_FakeRedis(), now=self.now)
+        self.assertEqual(metrics.assignment_andon, 1)
+        self.assertEqual(
+            [(ref.team, ref.assignment_group) for ref in metrics.assignment_andon_items],
+            [('engineering', 'engineering')],
+        )
+
+    def test_labeled_andon_series_header_only_when_none(self):
+        """No andon items → header-only family, zero samples; the overdue
+        series is unaffected."""
+        self._item('healthy recurring', due_date=self.now + timedelta(hours=1))
+        metrics = collect_recurring_invariant_metrics(redis_client=_FakeRedis(), now=self.now)
+        self.assertEqual(metrics.assignment_andon, 0)
+        self.assertEqual(metrics.assignment_andon_items, ())
+        text = render_prometheus_metrics(metrics)
+        self.assertIn('# TYPE pulse_recurring_assignment_andon_item gauge', text)
+        self.assertNotIn('\npulse_recurring_assignment_andon_item{', text)
+        # Overdue family unaffected by the scope extension.
+        self.assertIn('# TYPE pulse_recurring_overdue_item gauge', text)
+        self.assertNotIn('\npulse_recurring_overdue_item{', text)
+
 
 class _BlindRedis(_FakeRedis):
     """A fake whose GET path raises — the Redis-blind sample shape."""
