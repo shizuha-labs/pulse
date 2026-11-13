@@ -47,6 +47,32 @@ class OverdueRecurringItemRef:
 
 
 @dataclass(frozen=True)
+class AssignmentAndonItemRef:
+    """PLS-1345 (sara's 09-24 scope extension): per-item identity behind one
+    ``pulse_recurring_assignment_andon_item`` sample.
+
+    The scalar ``pulse_recurring_assignment_andon`` is scalar-only (no
+    team/kind labels) and the REST list ignores recurring filters entirely, so
+    an on-call could not decompose the backlog into team clusters from ANY
+    surface (ichi's 09-24 cluster read). Labels per the extended acceptance:
+
+    - ``team``: the owner team the bounded assignment retries were waiting on
+      (cycle-state ``assignment_wait_team``), falling back to the row's
+      ``assignment_group`` — this is the cluster an on-call routes to.
+    - ``kind``: the andon marker kind from the cycle-state event taxonomy
+      (``recurring_cycle_state`` records ``kind='assignment_andon'`` when the
+      bounded retries exhaust); literal today, meaningful if further andon
+      kinds are ever added under the same marker family.
+    """
+
+    item_key: str
+    organization_id: str
+    assignment_group: str
+    team: str
+    kind: str
+
+
+@dataclass(frozen=True)
 class RecurringInvariantMetrics:
     overdue: int
     unschedulable: int
@@ -74,6 +100,11 @@ class RecurringInvariantMetrics:
     # ``pulse_recurring_overdue_item`` series (one sample per entry, value 1).
     # Empty tuple when nothing is overdue — the scalar carries the count.
     overdue_items: tuple[OverdueRecurringItemRef, ...] = ()
+    # PLS-1345 scope extension: identity of each assignment-andon item,
+    # rendered as the labeled ``pulse_recurring_assignment_andon_item`` series
+    # (one sample per entry, value 1). Empty tuple when none — the scalar
+    # carries the count (scalar == sample count whenever assignment_andon > 0).
+    assignment_andon_items: tuple[AssignmentAndonItemRef, ...] = ()
 
 
 # PLAT-9452 defect 3: the sweep stamps this key on every successful run so the
@@ -219,6 +250,30 @@ def collect_recurring_invariant_metrics(redis_client=None, now=None) -> Recurrin
         and isinstance(item.metadata.get('recurring_cycle'), dict)
         and item.metadata['recurring_cycle'].get('assignment_andon_at')
     )
+    # PLS-1345 scope extension: keep the identity of each andon row so the
+    # exposition can decompose the backlog into owner-team clusters (the
+    # scalar cannot, and the REST list ignores recurring filters from every
+    # seat — ichi's 09-24 cluster read).
+    assignment_andon_refs = tuple(
+        AssignmentAndonItemRef(
+            item_key=str(item.item_key or item.pk),
+            organization_id=(
+                str(item.project.org_id)
+                if item.project is not None and item.project.org_id is not None
+                else ""
+            ),
+            assignment_group=item.assignment_group or "",
+            team=(
+                (item.metadata['recurring_cycle'].get('assignment_wait_team') or "")
+                or (item.assignment_group or "")
+            ),
+            kind="assignment_andon",
+        )
+        for item in items
+        if isinstance(item.metadata, dict)
+        and isinstance(item.metadata.get('recurring_cycle'), dict)
+        and item.metadata['recurring_cycle'].get('assignment_andon_at')
+    )
 
     leader_counts = {}
     for name in LEADER_NAMES:
@@ -244,6 +299,7 @@ def collect_recurring_invariant_metrics(redis_client=None, now=None) -> Recurrin
         missing_timer=missing_timer,
         group_queued_missing_timer=group_queued_missing_timer,
         assignment_andon=assignment_andon,
+        assignment_andon_items=assignment_andon_refs,
         leader_counts=leader_counts,
         redis_error=redis_error,
         sweep_last_success_timestamp=sweep_last_success_timestamp,
@@ -291,6 +347,23 @@ def render_prometheus_metrics(metrics: RecurringInvariantMetrics) -> str:
         "# HELP pulse_leader_count Pulse singleton leader lease presence by process name; expected value is 1.",
         "# TYPE pulse_leader_count gauge",
     ])
+    # PLS-1345 scope extension: labeled per-item series so an andon firing
+    # can be decomposed into owner-team clusters from any seat (the scalar
+    # cannot; the REST list ignores recurring filters). One sample per
+    # andon item; header-only when none (the scalar is the count of
+    # record, and equals the sample count whenever assignment_andon > 0).
+    lines.append(
+        "# HELP pulse_recurring_assignment_andon_item Per-item identity of each assignment-andon recurring item (value is always 1); one sample per item_key."
+    )
+    lines.append("# TYPE pulse_recurring_assignment_andon_item gauge")
+    for ref in metrics.assignment_andon_items:
+        lines.append(
+            f'pulse_recurring_assignment_andon_item{{item_key="{_escape_label(ref.item_key)}"'
+            f',organization_id="{_escape_label(ref.organization_id)}"'
+            f',assignment_group="{_escape_label(ref.assignment_group)}"'
+            f',team="{_escape_label(ref.team)}"'
+            f',kind="{_escape_label(ref.kind)}"}} 1'
+        )
     for name in sorted(metrics.leader_counts):
         lines.append(f'pulse_leader_count{{name="{name}"}} {metrics.leader_counts[name]}')
     # PLAT-9452 defect 3: sweep-liveness gauge. Omitted entirely on a Redis
