@@ -11580,6 +11580,14 @@ class WorkflowService:
                 # Cross-host redirects stay rejected (anti-SSRF).
                 if result.status_code in (301, 302, 307, 308):
                     loc = result.headers.get('Location') or ''
+                    # PLS-1464 follow-through (PLAT-6178 wedge, 2026-11-13):
+                    # Forgejo emits RELATIVE Locations for renamed repos
+                    # (shizuha-beta -> shizuha). Resolve them against the
+                    # request origin before the same-host check — a relative
+                    # path can never leave the origin host, so this stays
+                    # within the anti-SSRF contract.
+                    if loc and not urllib.parse.urlparse(loc).netloc:
+                        loc = urllib.parse.urljoin(origin, loc)
                     parsed = urllib.parse.urlparse(loc)
                     origin_host = urllib.parse.urlparse(origin).netloc
                     if (parsed.scheme not in ('http', 'https')
