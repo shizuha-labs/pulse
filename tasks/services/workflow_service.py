@@ -22026,7 +22026,8 @@ class WorkflowService:
         ).count()
 
     @staticmethod
-    def _agent_slot_queryset(item, email, slot_kind, *, user_id=None, team_name=None):
+    def _agent_slot_queryset(item, email, slot_kind, *, user_id=None, team_name=None,
+                             apply_team_role_exclusion=True):
         from ..models import Item
         aliases = WorkflowService._agent_email_aliases(email)
         from .operator_wait import exclude_operator_wait_items
@@ -22060,6 +22061,7 @@ class WorkflowService:
             WorkflowService._CAPACITY_PULL_EXCLUDED_STATUSES_BY_TEAM.get(
                 team, set(),
             )
+            if apply_team_role_exclusion else set()
         )
         if role_excluded:
             # Cross-team work still counts.  An engineer who is concretely
@@ -22090,6 +22092,17 @@ class WorkflowService:
         organization-scoped, umbrella- and operator-wait-excluded), so a seat
         the cap would reject is never a pull target.
 
+        Shed-parity (2026-10-19): the band counts here deliberately DROP the
+        team role-exclusion band `_agent_slot_queryset` applies on its other
+        callers. The PLS-509 returner sheds exactly the rows that band
+        excludes — a lane seat's own in-lane cards. With the exclusion kept,
+        the sweep saw a lane seat stacked with own-lane work as idle (the
+        13:43→13:52 pull→return loop onto a reviewer holding ~17 merge cards:
+        ready-band ~0 excluded vs shed-view 17), pulled onto it, and the cap
+        returned it minutes later. Capacity eligibility must read the same
+        rows the shed side sheds: a seat the returner would return is a seat
+        the sweep must never pull onto.
+
         Returns ``None`` when the team has no roster config (the caller defers
         to the legacy process-wide caps), else a bool.
         """
@@ -22109,6 +22122,7 @@ class WorkflowService:
                 continue
             load = WorkflowService._agent_slot_queryset(
                 item, norm_email, band, user_id=user_id,
+                apply_team_role_exclusion=False,
             ).count()
             if load >= cap and not ignores_cap:
                 return True
