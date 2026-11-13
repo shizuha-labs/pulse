@@ -12691,10 +12691,21 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                             candidate_reasons.append((e, verdict.reasons))
                             continue
                         if _cap_enforced_pod and not WorkflowService._assignment_ignores_wip_cap(it):
+                            # PLS-1433: shared capacity verdict. A None verdict
+                            # (no roster config for the resolved org) must
+                            # defer to the legacy counters exactly as the
+                            # shadow branch below does — treating None as
+                            # under-cap let a pull land on a seat the cap
+                            # would return (run-9395 signature).
                             seat_full = WorkflowService._slot_at_capacity(
                                 it, pod, e, user_id=uid,
                             )
-                            if seat_full:
+                            if seat_full is None:
+                                if WorkflowService._at_capacity(
+                                    active_load[uid], inflight_load[uid],
+                                ):
+                                    continue
+                            elif seat_full:
                                 candidate_reasons.append((e, ('over_capacity',)))
                                 continue
                         under.append((WorkflowService._route_load_key(pod, active_load[uid], inflight_load[uid], 0), e, uid))
