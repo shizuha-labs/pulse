@@ -75,7 +75,13 @@ def _http_json(url: str) -> Optional[object]:
         resp = requests.get(
             url,
             headers={'Authorization': f'token {_forgejo_token()}'},
-            timeout=15,
+            # PLS-1462: the deploy-verify gate calls this synchronously, once
+            # per merged PR (files) and once per head (status). 15s each held
+            # the worker past the 30s/60s client deadlines (~121s on
+            # HIVE-2707) before the gate could refuse. A short timeout fails
+            # closed (caller treats None/False as not-evidence) instead of
+            # hanging the transition.
+            timeout=4,
         )
         resp.raise_for_status()
         return resp.json()
