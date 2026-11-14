@@ -22075,7 +22075,17 @@ class WorkflowService:
         # PLS-1456: a devops-owned deploy/CI item must not consume an
         # engineering capacity slot even when an engineering seat is the
         # assignee. Engineering can still move its own items.
-        if team == 'engineering':
+        #
+        # PLS-1433 shed-parity: this exclusion exists only on the ADMISSION
+        # view. The PLS-509 returner's ready-count has NO lane exclusion — it
+        # counts every ready row assigned to the seat's aliases in the org.
+        # With the shed view active (capacity-eligibility verdicts), counting
+        # fewer rows than the returner made the sweep read a seat stacked
+        # with devops-owned rows as under-cap, pull onto it, and the
+        # returner shed the pull minutes later — the 11-13 unassign storm
+        # (nagi/ichi actor rows). Capacity eligibility must count exactly
+        # the rows the returner counts.
+        if apply_team_role_exclusion and team == 'engineering':
             qs = qs.exclude(assignment_group__iexact='devops')
         if getattr(item, 'pk', None):
             qs = qs.exclude(pk=item.pk)
@@ -22103,20 +22113,88 @@ class WorkflowService:
         rows the shed side sheds: a seat the returner would return is a seat
         the sweep must never pull onto.
 
-        Returns ``None`` when the team has no roster config (the caller defers
-        to the legacy process-wide caps), else a bool.
+        Returns ``None`` when the seat sits on no wip_enforced roster in the
+        item's organization (the caller defers to the legacy process-wide
+        caps), else a bool.
         """
         team = WorkflowService._canonical_team_name(team_name)
         norm_email = (email or '').strip().lower()
         if not team or not norm_email or item is None:
             return None
         config = WorkflowService._wip_roster_config(team, item)
-        if config is None:
+
+        # PLS-1433 cap-parity (2026-11-13): the PLS-509 returner does not use
+        # the pulled item's team roster — it enforces the strictest positive
+        # ready/active cap across EVERY active wip_enforced roster the seat
+        # sits on, organization-scoped, keyed (org_id, email). A seat on an
+        # engineering roster (ready 5) and a review roster (ready 3) is
+        # returned by the returner at 4 assigned-ready rows, but the
+        # item-team-only read below saw 4 < 5 = under-cap and pulled — the
+        # returner shed the pull minutes later, every sweep tick. Read the
+        # same policy the returner reads: a seat the returner would reject is
+        # never a pull target.
+        project = getattr(item, 'project', None)
+        organization_id = getattr(project, 'org_id', None)
+        ready_cap = int(config.ready_wip_cap or 0) if config else 0
+        active_cap = int(config.active_wip_cap or 0) if config else 0
+        on_enforced_roster = config is not None
+        if organization_id is not None:
+            aliases = WorkflowService._agent_email_aliases(norm_email)
+            legacy_slug_org = {
+                'shizuha': 1,
+                'shizuha-digital': 2,
+                'shizuha-trading': 3,
+                'personal-3': 4,
+            }
+            from ..models import TeamRoster
+            for roster in TeamRoster.objects.filter(is_active=True, wip_enforced=True):
+                roster_org = roster.organization_id
+                if roster_org is None:
+                    slug = (roster.organization_slug or '').strip().lower()
+                    roster_org = legacy_slug_org.get(slug)
+                    if roster_org is None and slug:
+                        # Persisted-slug fallback (same degraded source
+                        # `org_slug_for_project` trusts): sibling rows authored
+                        # by the same organization carry its immutable org id.
+                        # A NEW org that authors rows by slug with a NULL id was
+                        # invisible here, so its seats read as sitting on no
+                        # enforced roster and the verdict deferred (None).
+                        roster_org = TeamRoster.objects.filter(
+                            organization_slug=slug,
+                            is_active=True,
+                            organization_id__isnull=False,
+                        ).values_list('organization_id', flat=True).first()
+                if roster_org != organization_id:
+                    continue
+                # The returner's membership check reads the flat tier roster
+                # only (no junior_emails) — match it exactly.
+                members = WorkflowService._flat_roster(roster.tiers or [])
+                if not any(
+                    aliases & WorkflowService._agent_email_aliases(member)
+                    for member in members
+                ):
+                    continue
+                on_enforced_roster = True
+                for attr, current in (('ready_wip_cap', ready_cap),
+                                      ('active_wip_cap', active_cap)):
+                    candidate = int(getattr(roster, attr, None) or 0)
+                    strictest = (
+                        min(current, candidate)
+                        if current > 0 and candidate > 0
+                        else max(current, candidate)
+                    )
+                    if attr == 'ready_wip_cap':
+                        ready_cap = strictest
+                    else:
+                        active_cap = strictest
+        if not on_enforced_roster:
+            # The returner holds no policy for this seat — defer to the
+            # legacy process-wide counters exactly as before.
             return None
         ignores_cap = WorkflowService._assignment_ignores_wip_cap(item)
         for band, cap in (
-            ('ready', config.ready_wip_cap),
-            ('active', config.active_wip_cap),
+            ('ready', ready_cap),
+            ('active', active_cap),
         ):
             if cap <= 0:
                 continue
