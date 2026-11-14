@@ -10806,6 +10806,37 @@ def _pin_is_protected(item):
     return True
 
 
+def _urgent_is_protected(item):
+    """PLS-1486: urgent ready/active rows are non-sheddable in WIP reclaim.
+
+    The pull side (``sweep_assign_group_queued`` / ``_resolve_team_assignee``)
+    admits urgent work even when the seat is at its cap
+    (``WorkflowService._priority_ignores_wip_cap``, operator rule 2026-09-27).
+    The returner used to shed those same rows every */10 tick, and queue-assign
+    re-pushed them to the SAME seat a few minutes later: 4,427 of 6,553
+    unassigns on 13-14 Nov were same-seat loops on 116 urgent items.
+
+    Urgent rows therefore join the protected partition (like blocker roots and
+    live pins): they still count toward the cap, so the seat receives no new
+    non-urgent work, but they are never shed. A disabled seat (operator OFF or
+    service-deny) is seat death, so its urgent rows still shed and re-route.
+
+    Kill switch: ``PULSE_RECLAIM_URGENT_EXEMPT=0`` restores the old behaviour.
+    """
+    if str(os.environ.get('PULSE_RECLAIM_URGENT_EXEMPT', '1')).strip() == '0':
+        return False
+    from .services.workflow_service import WorkflowService
+    if not WorkflowService._assignment_ignores_wip_cap(item):
+        return False
+    cur = (getattr(item, 'assignee_email', '') or '').strip().lower()
+    if not cur:
+        return False
+    aliases = WorkflowService._agent_email_aliases(cur)
+    if aliases & WorkflowService._disabled_agent_emails():
+        return False
+    return True
+
+
 def _repin_decision_assignment(item, assignee_email):
     """Keep a decision pin active after failover within the pinned decision team.
 
@@ -11169,8 +11200,14 @@ def _reclaim_wip_overload():
                 it.updated_at,
                 it.pk,
             ))
-            protected = [it for it in active if it._queue_is_blocker_root]
-            ordinary = [it for it in active if not it._queue_is_blocker_root]
+            # PLS-1486: urgent rows are cap-exempt on the pull side, so they
+            # are non-sheddable here too (otherwise shed -> re-push loop).
+            protected = [
+                it for it in active
+                if it._queue_is_blocker_root or _urgent_is_protected(it)
+            ]
+            _protected_active_ids = {it.pk for it in protected}
+            ordinary = [it for it in active if it.pk not in _protected_active_ids]
             keep_ordinary = max(0, active_cap - len(protected))
             for stale in ordinary[keep_ordinary:]:
                 # PLAT-979 / PLS-1483: a live PLS-233 decision pin (direct
@@ -11272,7 +11309,9 @@ def _reclaim_wip_overload():
         ))
         protected_ready = [
             it for it in ready
-            if it._queue_is_blocker_root or _pin_is_protected(it)
+            if it._queue_is_blocker_root
+            or _pin_is_protected(it)
+            or _urgent_is_protected(it)  # PLS-1486
         ]
         protected_ids = {it.pk for it in protected_ready}
         ordinary_ready = [it for it in ready if it.pk not in protected_ids]
