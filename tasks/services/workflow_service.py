@@ -5262,6 +5262,15 @@ class WorkflowService:
             status = str(pr.get('status') or '').strip().lower()
             if status in ('closed', 'merged'):
                 continue
+            # PLAT-7527: an entry explicitly flagged ``stale_artifact`` (set by
+            # an admin via the item PR-flag endpoint) is a recorded judgment
+            # that the linked row does not represent a real open obligation —
+            # e.g. GitHub-era links whose numbers Origin re-used for unrelated
+            # PRs. Exempt it from the open-PR gate; fail-closed is preserved
+            # because only admins can set the flag and every unflagged open
+            # row still blocks.
+            if pr.get('stale_artifact'):
+                continue
             if status == 'open':
                 if merged_origin and WorkflowService._is_retired_mirror_pr(pr):
                     continue  # PLAT-5854: superseded mirror duplicate.
