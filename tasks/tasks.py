@@ -7671,6 +7671,32 @@ def _org_health_candidate_availability(W, lane, item):
     return reasons_by_email
 
 
+def _post_fenced_sweep_verdict(item, holder, generation, post):
+    """PLAT-11947: post one sweep verdict only under the generation lease.
+
+    A stale writer or a lapsed lease is logged and skipped. The sweep continues
+    with the next target; this helper never retries the winner.
+    """
+    from .models import StaleSweepWriter, SweepLeaseExpired
+    from .services.sweep_lease import SweepLeaseLost, post_sweep_verdict
+
+    try:
+        return post_sweep_verdict(item, holder, generation, post)
+    except StaleSweepWriter as exc:
+        logger.warning(
+            'sweep verdict lost lease on %s: %s',
+            getattr(item, 'item_key', None), exc.as_event(),
+        )
+        return None
+    except (SweepLeaseExpired, SweepLeaseLost) as exc:
+        event = exc.as_event() if hasattr(exc, 'as_event') else {'event': type(exc).__name__, 'detail': str(exc)}
+        logger.error(
+            'sweep verdict lease rejected on %s: %s',
+            getattr(item, 'item_key', None), event,
+        )
+        return None
+
+
 def _org_health_recent_active_team_activity(members, now):
     """Return recent production activity for explicitly-active roster members.
 
@@ -7938,6 +7964,9 @@ def emit_org_health_signal(
     reping_seconds,
     organization_id=None,
     subject_key='',
+    fence_item=None,
+    fence_holder='',
+    fence_generation=None,
 ):
     """Emit a PM-side org-health signal through the single DM-only sink.
 
@@ -7981,14 +8010,27 @@ def emit_org_health_signal(
 
     title = str(payload.get('title') or '')
     body = str(payload.get('body') or '')
-    delivered = _dm_program_management_lead(
-        workflow_service,
-        f"🩺 [org-health] {title}\n\n{body}\n\n(signal: {signal_key}; "
-        f"DM-only per operator 2026-07-12 — no task filed; re-pings "
-        f"every {reping_seconds // 3600}h while the condition persists)",
-        organization_id=organization_id,
-        subject_key=subject_key,
-    )
+
+    def _deliver(_locked):
+        return _dm_program_management_lead(
+            workflow_service,
+            f"🩺 [org-health] {title}\n\n{body}\n\n(signal: {signal_key}; "
+            f"DM-only per operator 2026-07-12 — no task filed; re-pings "
+            f"every {reping_seconds // 3600}h while the condition persists)",
+            organization_id=organization_id,
+            subject_key=subject_key,
+        )
+
+    if fence_item is not None and fence_generation is not None:
+        delivered = _post_fenced_sweep_verdict(
+            fence_item,
+            fence_holder or 'sweep_org_health',
+            fence_generation,
+            _deliver,
+        )
+        delivered = bool(delivered)
+    else:
+        delivered = _deliver(None)
     if delivered:
         return True
 
@@ -8870,6 +8912,12 @@ def sweep_org_health(self):
             now=now,
             redis_client=_rc,
             reping_seconds=reping,
+            fence_item=existing.get(sig),
+            fence_holder='sweep_org_health',
+            fence_generation=(
+                int(getattr(existing.get(sig), 'state_generation', 0) or 0)
+                if existing.get(sig) is not None else None
+            ),
         ):
             dmed += 1
     # auto-resolve cleared signals (legacy signal tasks + clear-notify)
