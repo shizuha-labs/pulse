@@ -10727,6 +10727,85 @@ def _decision_pinned_team(item):
     return (_decision_pin_metadata(item).get('pinned_team') or '').strip().lower()
 
 
+def _pin_stale_hours():
+    """PLS-1483: freshness window (hours) for a decision pin, env-overridable."""
+    raw = str(os.environ.get('PULSE_PIN_STALE_HOURS', '') or '').strip()
+    try:
+        hours = float(raw) if raw else 72.0
+    except (TypeError, ValueError):
+        hours = 72.0
+    return max(0.0, hours)
+
+
+def _pin_is_protected(item):
+    """PLS-1483: shared protection predicate for BOTH WIP-reclaim partitions.
+
+    A PLS-233 decision pin (direct assignment WITH a recorded reason) is a
+    deliberate routing decision, not sheddable slack — the ready-overflow
+    returner was the one reclaim path missing the check, so deliberate lead
+    and operator assigns were shed within one tick (HIVE-3008, PLAT-11436
+    twice, PLS-1483 itself at 10:22 IST).
+
+    The pin protects the item in the active AND the ready partition while
+    ALL of these hold:
+
+    1. the pinned email still equals the current assignee
+       (`_is_decision_pinned` — a later real reassignment auto-releases it),
+    2. the pin is fresh: age <= `PULSE_PIN_STALE_HOURS` (default 72h), OR the
+       pinned assignee has activity on this item recorded after the pin
+       timestamp (an old pin the owner still actively works is a live
+       decision, not stale slack),
+    3. the seat is live right now (live evidence required — a deleted or
+       stopped seat is dead ownership, not protected slack).
+
+    A pin that fails any leg is legitimately shed; the shed caller writes the
+    reason into the system comment. The pin auto-releases on real
+    reassignment/status transition, so protection cannot accumulate ghosts.
+    """
+    da = _decision_pin_metadata(item)
+    if not _is_decision_pinned(item):
+        return False
+    cur = (getattr(item, 'assignee_email', '') or '').strip().lower()
+
+    # Leg 2 — the 72h stale-pin bound. An old pin without owner activity no
+    # longer represents a live decision; the seat activity check is the cheap
+    # discriminator that keeps actively-worked old pins protected.
+    at = None
+    at_raw = str(da.get('at') or '').strip()
+    if at_raw:
+        try:
+            from django.utils.dateparse import parse_datetime
+            parsed = parse_datetime(at_raw)
+            if parsed is not None:
+                if parsed.utcoffset() is None:
+                    parsed = timezone.make_aware(parsed)
+                at = parsed
+        except (TypeError, ValueError):
+            at = None
+    stale_hours = _pin_stale_hours()
+    if at is not None and stale_hours > 0:
+        age_hours = (timezone.now() - at).total_seconds() / 3600.0
+        if age_hours > stale_hours:
+            from .models import ItemActivity
+            owner_active = ItemActivity.objects.filter(
+                item=item, user_email=cur, created_at__gte=at,
+            ).exists()
+            if not owner_active:
+                return False
+
+    # Leg 3 — seat death. Authoritative switch: the disabled set (operator OFF
+    # + PLS-253 service-deny). HIBERNATION is NOT seat death: a leased seat
+    # parked waiting for its model lease still owns its work — hibernating it
+    # must not strip the pin (HIVE-3008 → san and every operator pin on a
+    # lease-waiting seat; ~half the GLM fleet sits in that state). A deleted
+    # seat has no row to shed; nothing here re-resolves live capacity.
+    from .services.workflow_service import WorkflowService
+    aliases = WorkflowService._agent_email_aliases(cur)
+    if aliases & WorkflowService._disabled_agent_emails():
+        return False
+    return True
+
+
 def _repin_decision_assignment(item, assignee_email):
     """Keep a decision pin active after failover within the pinned decision team.
 
@@ -10839,6 +10918,32 @@ def _authoritative_pipeline_lane(item):
         'in_qa': 'qa',
         'awaiting_merge': 'merge',
     }.get(status, current_group)
+
+
+def _record_pinned_over_cap_metric(*, ready_cap, pinned, item_keys):
+    """PLS-1483 test (b): statusz-legible warning metric for the over-cap case.
+
+    Fires when decision-pinned items ALONE exceed the seat's assigned-ready
+    cap: nothing is shed (shedding a live pin would undo deliberate routing),
+    so the mechanism must be observable — a cache payload under
+    `pulse:wip_reclaim:pinned_over_cap:last` plus a logger.warning — instead
+    of silently exceeding the nominal cap.
+    """
+    from django.core.cache import cache
+    keys = [str(k) for k in (item_keys or [])][:50]
+    payload = {
+        'state': 'pinned_over_ready_cap',
+        'ready_cap': int(ready_cap),
+        'pinned': int(pinned),
+        'items': keys,
+        'observed_at': timezone.now().isoformat(),
+    }
+    cache.set('pulse:wip_reclaim:pinned_over_cap:last', payload, timeout=None)
+    logger.warning(
+        'PLS-509 ready partition over cap from decision pins alone: '
+        'pinned=%s cap=%s items=%s — nothing shed',
+        pinned, ready_cap, keys[:10],
+    )
 
 
 def _reclaim_wip_overload():
@@ -11068,6 +11173,13 @@ def _reclaim_wip_overload():
             ordinary = [it for it in active if not it._queue_is_blocker_root]
             keep_ordinary = max(0, active_cap - len(protected))
             for stale in ordinary[keep_ordinary:]:
+                # PLAT-979 / PLS-1483: a live PLS-233 decision pin (direct
+                # assignment WITH a recorded reason, still held by the pinned
+                # owner, pin fresh) is a deliberate routing decision, not
+                # sheddable slack — never unpin it. Stale/dead pins shed like
+                # ordinary work.
+                if _pin_is_protected(stale):
+                    continue
                 # PLS-1433: a deliberate direct override (direct_assignment
                 # metadata) on a seat that is live right now is a routing
                 # decision, not sheddable slack — recovery must not unpin it.
@@ -11158,24 +11270,57 @@ def _reclaim_wip_overload():
             it.created_at,
             it.pk,
         ))
-        protected_ready = [it for it in ready if it._queue_is_blocker_root]
-        ordinary_ready = [it for it in ready if not it._queue_is_blocker_root]
-        keep_ordinary_ready = max(0, ready_cap - len(protected_ready))
-        ready_overflow = (
-            ordinary_ready[keep_ordinary_ready:] if ready_cap > 0 else []
-        )
+        protected_ready = [
+            it for it in ready
+            if it._queue_is_blocker_root or _pin_is_protected(it)
+        ]
+        protected_ids = {it.pk for it in protected_ready}
+        ordinary_ready = [it for it in ready if it.pk not in protected_ids]
+        ready_overflow = []
+        if ready_cap > 0:
+            if len(protected_ready) > ready_cap:
+                # Over-cap from pins alone: the pins fill the quota, so the
+                # seat cannot keep ANY ready item beyond them — but unpinned
+                # ready items must still overflow (pins occupy the quota,
+                # they do not exempt the seat from it). Emit the warning
+                # metric AND overflow all ordinary work so unpinned
+                # siblings shed.
+                _record_pinned_over_cap_metric(
+                    ready_cap=ready_cap, pinned=len(protected_ready),
+                    item_keys=[it.item_key or it.pk for it in protected_ready],
+                )
+                ready_overflow = list(ordinary_ready)
+            else:
+                keep_ordinary_ready = ready_cap - len(protected_ready)
+                ready_overflow = ordinary_ready[keep_ordinary_ready:]
         for excess in ready_overflow:
             with transaction.atomic():
                 fresh = Item.objects.select_for_update().get(pk=excess.pk)
                 if fresh.status not in ready_statuses:
                     continue
-                clear_assignment_to_group_queue(
-                    fresh, reason='wip_ready_overflow', save=True,
+                # PLS-1483 test (d): a legitimately shed item must land on a
+                # REAL watched lane — derive the owning team instead of
+                # stamping the unwatched "None" queue (PLS-509 10-27 root).
+                current_team = WorkflowService._canonical_team_name(
+                    fresh.assignment_group,
                 )
+                target_team = current_team
+                if not target_team:
+                    derived, _trace = WorkflowService._derive_owner_team_trace(fresh)
+                    target_team = WorkflowService._canonical_team_name(derived or '')
+                if target_team and target_team != current_team:
+                    reroute_assignment_to_group_queue(
+                        fresh, target_team,
+                        reason='wip_ready_overflow', save=True,
+                    )
+                else:
+                    clear_assignment_to_group_queue(
+                        fresh, reason='wip_ready_overflow', save=True,
+                    )
             queued_ready += 1
             _create_system_comment_deduped(
                 fresh,
-                f'Returned to the **{fresh.assignment_group}** team queue by effective priority/stage/FIFO order: '
+                f'Returned to the **{target_team or "unassigned"}** team queue by effective priority/stage/FIFO order: '
                 f'assigned-ready cap is {ready_cap} (PLS-509).',
             )
     return {
