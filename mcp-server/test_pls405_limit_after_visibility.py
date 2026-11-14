@@ -74,6 +74,38 @@ class LimitAfterVisibilityTests(unittest.TestCase):
         self.assertEqual([call["page"] for call in calls if call.get("page")], [1, 2])
         self.assertGreaterEqual(calls[0]["page_size"], 20)
 
+    def test_fetch_default_active_page_honors_start_page(self):
+        """PLAT-10483: offset paging must not restart at page 1."""
+        calls = []
+
+        def fake_api_request(method, endpoint, params=None, data=None, as_user=False):
+            calls.append(dict(params or {}))
+            if params.get("status") == "scheduled":
+                return {"results": [], "count": 0, "next": None}
+            return {
+                "results": [{
+                    "id": 9,
+                    "item_key": "PLS-PAGE3",
+                    "title": "Offset page",
+                    "status": "open",
+                    "priority": "high",
+                    "is_recurring": False,
+                    "due_date": None,
+                }],
+                "next": None,
+            }
+
+        with patch.object(pulse_server, "api_request", side_effect=fake_api_request):
+            result, visible, hidden_terminal, hidden_scheduled = pulse_server._fetch_default_active_page(
+                {"mode": "task", "is_active": "true"},
+                5,
+                start_page=3,
+            )
+
+        self.assertNotIn("error", result)
+        self.assertEqual([item["item_key"] for item in visible], ["PLS-PAGE3"])
+        self.assertEqual([call["page"] for call in calls if call.get("page")], [3])
+
     def test_get_my_tasks_limit_one_returns_ready_item_after_hidden_row(self):
         calls = []
 

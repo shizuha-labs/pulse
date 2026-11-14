@@ -48,6 +48,14 @@ class JQLParser:
         'itemtype': 'item_type',
         'item_type': 'item_type',
 
+        # Team (PLAT-10483): JQL 'team' resolves to the canonical
+        # assignment_group slug (lowercase, dash-normalized at save), enabling
+        # team-scoped queries like `team = 'security' AND assignee is empty`
+        # — the enumeration path the stale-unassigned router's responders
+        # were blocked from using.
+        'team': 'assignment_group',
+        'assignment_group': 'assignment_group',
+
         # Assignment
         'assignee': 'assignee_email',
         'assignee_id': 'assignee_id',
