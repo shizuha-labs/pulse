@@ -1995,7 +1995,10 @@ class AtomicWipAdmissionTests(TransactionTestCase):
                 assignment_group='review', assignee_id=self.UID,
                 assignee_email=self.EMAIL, workflow_name='autonomous-dev', project=self.project,
             ))
-        with patch('tasks.user_service.user_service', self._user_service()):
+        # PLS-1486: urgent rows are now reclaim-exempt by default; this test
+        # pins the legacy urgent-FIFO shed order behind the kill switch.
+        with patch('tasks.user_service.user_service', self._user_service()), \
+                patch.dict(os.environ, {'PULSE_RECLAIM_URGENT_EXEMPT': '0'}):
             result = _reclaim_wip_overload()
         assigned = list(Item.objects.filter(
             pk__in=[i.pk for i in created], assignee_email=self.EMAIL,
@@ -2174,11 +2177,13 @@ class AtomicWipAdmissionTests(TransactionTestCase):
             workflow_name='autonomous-dev',
             project=self.project,
         )
+        # PLS-1486: unrelated work is 'normal' -- urgent rows are now
+        # reclaim-exempt, so a normal row is what gets reclaimed around the root.
         ordinary = Item.objects.create(
-            title='unrelated urgent active work',
+            title='unrelated normal active work',
             mode='task',
             status='in_review',
-            priority='urgent',
+            priority='normal',
             assignment_group='review',
             assignee_id=self.UID,
             assignee_email=self.EMAIL,
