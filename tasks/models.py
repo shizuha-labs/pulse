@@ -8686,6 +8686,67 @@ class ItemStateMutationMarker(models.Model):
         db_table = 'tasks_item_state_mutation_marker'
 
 
+class SweepWorkLease(models.Model):
+    """PLAT-11947 fencing slot for one sweep target.
+
+    A worker posts a verdict only while it holds the current generation.
+    A superseded writer is rejected. A lapsed lease expires loudly.
+    """
+
+    item = models.OneToOneField('Item', on_delete=models.CASCADE, related_name='sweep_work_lease')
+    generation = models.PositiveBigIntegerField()
+    holder = models.CharField(max_length=128)
+    expires_at = models.DateTimeField()
+    expired_loudly = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'tasks_sweep_work_lease'
+
+
+class StaleSweepWriter(Exception):
+    """Typed rejection for a sweep worker whose generation was superseded."""
+
+    code = 'stale_sweep_writer'
+
+    def __init__(self, item_key, held_generation, attempted_generation):
+        self.item_key = item_key
+        self.held_generation = held_generation
+        self.attempted_generation = attempted_generation
+        super().__init__(
+            f'stale sweep writer for {item_key}: held {held_generation}, '
+            f'attempted {attempted_generation}'
+        )
+
+    def as_event(self):
+        return {
+            'event': self.code,
+            'item_key': self.item_key,
+            'held_generation': self.held_generation,
+            'attempted_generation': self.attempted_generation,
+        }
+
+
+class SweepLeaseExpired(TimeoutError):
+    """Fail-loud expiry of a sweep work lease (PLAT-11947)."""
+
+    code = 'sweep_lease_expired'
+
+    def __init__(self, item_key, expires_at):
+        self.item_key = item_key
+        self.expires_at = expires_at
+        super().__init__(
+            f'sweep lease for {item_key} expired at {expires_at.isoformat()}'
+        )
+
+    def as_event(self):
+        return {
+            'event': self.code,
+            'item_key': self.item_key,
+            'expires_at': self.expires_at.isoformat(),
+        }
+
+
 # =============================================================================
 # PLS-733 / ADR-0056 + ADR-0064 — external wait authority and bindings
 # =============================================================================
