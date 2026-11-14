@@ -1380,6 +1380,7 @@ def _fetch_default_active_page(
     limit: int,
     *,
     as_user: bool = False,
+    start_page: int = 1,
 ) -> tuple[dict, list, int, list]:
     """Fetch default-active task pages and apply local filters before `limit`.
 
@@ -1403,10 +1404,14 @@ def _fetch_default_active_page(
     hidden_scheduled: list = []   # PLS-838: rows, so the annotation can be computed
     result: dict = {}
     page_size = _visible_page_size(limit)
-    page = 1
+    try:
+        page = max(1, int(start_page))
+    except (TypeError, ValueError):
+        page = 1
     max_pages = 10  # safety cap: 10 * 200 = 2k inspected rows
+    last_page = page + max_pages - 1
 
-    while page <= max_pages and len(visible) < requested:
+    while page <= last_page and len(visible) < requested:
         page_params = {**params, "page_size": page_size, "page": page}
         result = api_request("GET", "/items/", params=page_params, as_user=as_user)
         if "error" in result:
@@ -1843,6 +1848,7 @@ def list_tasks(
     tags: Optional[str] = None,
     jql: Optional[str] = None,
     limit: int = 20,
+    offset: int = 0,
 ) -> str:
     """
     List tasks in active states. This tool returns ONLY tasks in active states
@@ -1886,9 +1892,25 @@ def list_tasks(
         tags: Filter by tags (comma-separated)
         jql: JQL query string for advanced filtering (e.g., "status = 'in_progress' AND priority = 'high'")
         limit: Maximum number of tasks (default 20)
+        offset: Skip the first N rows of the filtered result set before applying
+            limit (0-based). This is what makes team-scoped stale-unassigned
+            enumeration possible (PLAT-10483): without it, page=1 was pinned and
+            every paging call returned byte-identical output. FastMCP silently
+            DROPS unknown kwargs (PLS-61 pattern), so an offset passed to the old
+            signature vanished instead of erroring — the fix plumbs it through
+            to the backend `page` param on both the direct and default-active
+            fetch paths.
     """
+    # PLAT-10483: offset is the page carrier. page_size == limit (1:1), so
+    # page = offset//limit + 1; a partial-page offset floors to the page that
+    # contains row `offset`. (0-offset → page 1, the historical behavior.)
+    offset = max(0, int(offset or 0))
+    start_row = (offset // max(1, limit)) * max(1, limit)
+    page_no = start_row // max(1, limit) + 1
+
     params = {"mode": "task", "page_size": limit, "queue_order": "true"}
     if status:
+        params["page"] = page_no
         params["status"] = status
     else:
         # Filter terminal/scheduled rows in the API before pagination so old
@@ -1919,7 +1941,8 @@ def list_tasks(
         hidden = 0
         hidden_future = 0
     else:
-        result, items, hidden, hidden_future = _fetch_default_active_page(params, limit)
+        result, items, hidden, hidden_future = _fetch_default_active_page(
+            params, limit, start_page=page_no)
         if "error" in result:
             return _fmt_error(result)
 
