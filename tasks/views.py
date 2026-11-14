@@ -13546,7 +13546,21 @@ class TransitionExecuteView(APIView):
             #      Merge → Verify Fixed without reading the Verify-Fixed article).
             from .serializers import ItemSerializer
             try:
-                payload = ItemSerializer(item).data
+                # PLAT-13691: a committed transition on a comment-heavy item
+                # was held past the 30s gateway while ItemSerializer walked
+                # the thread. An exception already degrades (PLS-523). Bound
+                # the enrichment queries on this connection so a slow success
+                # degrades the same way instead of nginx-504ing a commit that
+                # already landed. The timeout is session-scoped on this
+                # connection and is reset before the response returns.
+                from django.db import connection
+                with connection.cursor() as cursor:
+                    cursor.execute("SET statement_timeout = '8s'")
+                try:
+                    payload = ItemSerializer(item).data
+                finally:
+                    with connection.cursor() as cursor:
+                        cursor.execute("SET statement_timeout = DEFAULT")
             except Exception:
                 # PLS-523: the workflow state transition already COMMITTED in
                 # execute_transition() above. If rich display serialization
