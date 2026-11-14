@@ -16070,6 +16070,116 @@ class ProjectConfigurationViewSet(viewsets.ModelViewSet):
         )
 
 
+class ItemPullRequestStaleArtifactView(APIView):
+    """
+    PLAT-7527: flag/unflag a linked-PR entry as a ``stale_artifact``.
+
+    GitHub-era PR links whose numbers Origin re-used for unrelated PRs can
+    never reach a terminal status of their own and permanently wedge terminal
+    close under the open-PR guard — even when the task's real fix is merged
+    and fully verified. This endpoint records an explicit admin judgment that
+    a specific linked row is a stale artifact, not an open obligation; the
+    open-PR gate (WorkflowService._has_open_linked_prs / tasks._item_has_open_linked_pr)
+    exempts flagged rows.
+
+    Body: {"url": "<linked pr url>", "stale_artifact": true|false, "reason": "<why>"}
+
+    Fail-closed: admin-only (is_superuser/is_staff). The entry is matched by
+    exact URL (trailing-slash-insensitive); an unknown URL is a 404, so a
+    typo can never flag the wrong row. Every change writes an ItemActivity row.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, item_id):
+        try:
+            item = _resolve_item(item_id)
+        except Item.DoesNotExist:
+            return Response({'error': 'Item not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not _is_admin(request.user):
+            return Response(
+                {'error': 'Only admins may flag linked-PR stale artifacts'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # PLAT-7527 root-cause guard: this view can be reached with a plain
+        # WSGIRequest (direct invocation without DRF's request wrapping, e.g.
+        # tests or non-DRF mounting). request.data exists only on DRF Requests.
+        # Normalize to a dict-like payload; DRF behavior is unchanged.
+        payload = getattr(request, 'data', None)
+        if payload is None:
+            try:
+                raw = request.body
+                payload = json.loads(raw) if raw else {}
+            except (ValueError, AttributeError):
+                payload = {}
+
+        url = str(payload.get('url') or '').strip().rstrip('/')
+        flag = bool(payload.get('stale_artifact'))
+        reason = str(payload.get('reason') or '').strip()
+        if not url:
+            return Response({'error': 'url is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if flag and len(reason) < 10:
+            return Response(
+                {'error': 'reason (>=10 chars) is required when flagging a stale artifact'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        meta = dict(item.metadata or {})
+        prs = meta.get('pull_requests') or []
+        target = None
+        for entry in prs:
+            if isinstance(entry, dict) and str(entry.get('url') or '').strip().rstrip('/') == url:
+                target = entry
+                break
+        if target is None:
+            return Response(
+                {'error': f'No linked PR entry with url {url!r} on this item'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        old_flag = bool(target.get('stale_artifact'))
+        if old_flag == flag:
+            return Response({
+                'item': item.item_key,
+                'url': url,
+                'stale_artifact': flag,
+                'message': 'No change — flag already set as requested',
+            })
+
+        target['stale_artifact'] = flag
+        if flag:
+            target['stale_artifact_reason'] = reason
+            target['stale_artifact_set_by'] = getattr(request.user, 'email', '') or str(request.user)
+            target['stale_artifact_set_at'] = timezone.now().isoformat()
+        else:
+            for key in ('stale_artifact_reason', 'stale_artifact_set_by', 'stale_artifact_set_at'):
+                target.pop(key, None)
+        meta['pull_requests'] = prs
+        item.metadata = meta
+        item.save(update_fields=['metadata'])
+
+        label = f"{target.get('repo') or ''}#{target.get('number') or ''}".strip('#') or url
+        ItemActivity.objects.create(
+            item_id=item.pk,
+            action='pr_stale_artifact_flag' if flag else 'pr_stale_artifact_unflag',
+            field_name='Pull Request',
+            old_value=f'{label} — stale_artifact={old_flag}',
+            new_value=(
+                f'{label} — stale_artifact={flag} ({reason})' if flag
+                else f'{label} — stale_artifact=False'
+            ),
+            user_id=getattr(request.user, 'id', None) or 0,
+            user_email=(getattr(request.user, 'email', '') or '')[:254],
+        )
+        return Response({
+            'item': item.item_key,
+            'url': url,
+            'stale_artifact': flag,
+            'reason': reason if flag else '',
+        })
+
+
 class ItemBulkOperationView(APIView):
     """
     Bulk operations on items.

@@ -43,7 +43,7 @@ from .views import (
     StatusViewSet, ResolutionViewSet,
     WorkflowViewSet, WorkflowTransitionViewSet,
     WorkflowSchemeViewSet, TransitionExecuteView, ItemAvailableTransitionsView, ItemRunNowView, ItemSnoozeView, ItemChangeWorkflowView,
-    ItemReturnToLaneView,
+    ItemReturnToLaneView, ItemPullRequestStaleArtifactView,
     # Issue types, screens, permissions, SLA, boards, dashboards, automation
     IssueTypeViewSet, IssueTypeSchemeViewSet,
     CustomFieldViewSet, CustomFieldContextViewSet, CustomFieldValueViewSet,
@@ -216,6 +216,7 @@ urlpatterns = [
     path('items/<str:item_id>/run-now/', ItemRunNowView.as_view(), name='item-run-now'),
     path('items/<str:item_id>/snooze/', ItemSnoozeView.as_view(), name='item-snooze'),
     path('items/<str:item_id>/change-workflow/', ItemChangeWorkflowView.as_view(), name='item-change-workflow'),
+    path('items/<str:item_id>/pull-requests/stale-artifact/', ItemPullRequestStaleArtifactView.as_view(), name='item-pr-stale-artifact'),
 
     # Bulk operations
     path('items/bulk/', ItemBulkOperationView.as_view(), name='item-bulk-operation'),

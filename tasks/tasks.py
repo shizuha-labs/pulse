@@ -15311,7 +15311,13 @@ def _record_merge_event_retry_state(item, *, fingerprint, error) -> dict:
 
 def _item_has_open_linked_pr(item) -> bool:
     prs = (getattr(item, 'metadata', None) or {}).get('pull_requests') or []
-    return any((entry.get('status') or '').lower() == 'open' for entry in prs)
+    return any(
+        (entry.get('status') or '').lower() == 'open'
+        # PLAT-7527: admin-flagged stale artifacts (GitHub-era links whose
+        # numbers Origin re-used for unrelated PRs) are not open obligations.
+        and not entry.get('stale_artifact')
+        for entry in prs
+    )
 
 
 
