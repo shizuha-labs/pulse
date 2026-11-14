@@ -166,3 +166,97 @@ class AcceptanceModePatchLoudRejectTests(TestCase):
             'created_by_email': 'jun@shizuha.com',
         })
         self.assertTrue(serializer.is_valid(), serializer.errors)
+
+
+class BudgetCallDirectTests(TestCase):
+    """PLAT-11436 review-3: the budgeted wire leg exercised DIRECTLY — the
+    run-10804 regression class (module-global slot state mis-scoped inside the
+    same function that first reads it) cannot come back through this seam."""
+
+    def setUp(self):
+        self._snap = (
+            ci_only_evidence._ADMITTED, ci_only_evidence._COMPLETED,
+            ci_only_evidence._EXECUTOR,
+        )
+        self._reset_pool()
+
+    def tearDown(self):
+        self._drain()
+        (
+            ci_only_evidence._ADMITTED, ci_only_evidence._COMPLETED,
+            ci_only_evidence._EXECUTOR,
+        ) = self._snap
+
+    @staticmethod
+    def _reset_pool():
+        ci_only_evidence._ADMITTED = 0
+        ci_only_evidence._COMPLETED = 0
+        ci_only_evidence._EXECUTOR = None
+        # Drain then refill the semaphore so each test starts with 4 free.
+        try:
+            while True:
+                ci_only_evidence._SLOT_SEM.release()
+        except ValueError:
+            pass
+
+    @staticmethod
+    def _drain():
+        import time
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if ci_only_evidence._slots_in_flight() == 0:
+                return
+            time.sleep(0.05)
+
+    def test_fast_call_returns_result(self):
+        self.assertEqual(
+            ci_only_evidence._budget_call(lambda: 42, None), 42,
+        )
+
+    def test_trickle_past_budget_fails_closed_and_fast(self):
+        import time
+        start = time.monotonic()
+        out = ci_only_evidence._budget_call(
+            lambda: time.sleep(3), time.monotonic() + 0.2,
+        )
+        elapsed = time.monotonic() - start
+        self.assertIsNone(out)
+        self.assertLess(elapsed, 2.0)
+
+    def test_spent_budget_refuses_without_wire(self):
+        import time
+        calls = []
+        out = ci_only_evidence._budget_call(
+            lambda: calls.append(1), time.monotonic() - 1.0,
+        )
+        self.assertIsNone(out)
+        self.assertEqual(calls, [])
+
+    def test_saturated_pool_refuses_without_wire(self):
+        import threading
+        import time
+        release = threading.Event()
+        blockers = []
+        try:
+            # Claim all 4 slots with tasks that block until released.
+            for _ in range(ci_only_evidence._MAX_IN_FLIGHT):
+                out = ci_only_evidence._budget_call(
+                    release.wait, time.monotonic() + 5.0,
+                )
+                self.assertIsNone(out)  # timed out → slot held, blocker alive
+                blockers.append(out)
+            # 5th call: pool saturated → refuses WITHOUT wire, instantly.
+            start = time.monotonic()
+            out = ci_only_evidence._budget_call(
+                lambda: True, time.monotonic() + 1.0,
+            )
+            self.assertIsNone(out)
+            self.assertLess(time.monotonic() - start, 0.5)
+        finally:
+            release.set()
+        self._drain()
+
+    def test_exception_in_task_returns_none(self):
+        def boom():
+            raise RuntimeError('wire death')
+        self.assertIsNone(ci_only_evidence._budget_call(boom, None))

@@ -203,6 +203,17 @@ class DeployVerifyGateV4Tests(TestCase):
                 os.environ.__setitem__(n, v) if v is not None else os.environ.pop(n, None)
             ))
             os.environ.pop(name, None)
+        # PLAT-11436: the compare state is module-level (shared executor +
+        # in-flight counter); snapshot it and restore on cleanup so a case
+        # that swaps or strands pool state cannot leak into the next one.
+        _snapshot_executor = WorkflowService._COMPARE_EXECUTOR
+        _snapshot_in_flight = WorkflowService._COMPARE_IN_FLIGHT
+
+        def _restore_compare_state():
+            WorkflowService._COMPARE_EXECUTOR = _snapshot_executor
+            WorkflowService._COMPARE_IN_FLIGHT = _snapshot_in_flight
+
+        self.addCleanup(_restore_compare_state)
 
     # ── factories ────────────────────────────────────────────────────────────
 
@@ -1619,6 +1630,151 @@ class DeployVerifyGateV4Tests(TestCase):
         # Exact identity of base and deployed is ancestry-trivial (no network).
         self.assertTrue(WorkflowService._prove_deployed_descends_from_merged_head(
             'shizuha-labs', 'x', MERGED_SHA, MERGED_SHA))
+
+    # ── PLAT-11436: overall wall-clock deadline on the compare leg ───────────
+
+    def test_compare_refuses_on_overall_wall_clock_deadline(self):
+        # A slow-drip Origin response resets the per-op socket timeout on
+        # every read, so elapsed time is unbounded without an overall
+        # deadline. The deadline must trip from the CALLER: the helper
+        # returns a definitive "cannot prove ancestry" refusal (False) well
+        # before the trickle completes, instead of holding the gunicorn
+        # worker past the 120s worker timeout.
+        import time
+
+        def trickle(url, headers=None, timeout=None):
+            time.sleep(4)
+            return self._forgejo_compare_response(0)
+
+        with mock.patch.dict(os.environ, {
+            'PULSE_COMPARE_WALL_CLOCK_SECONDS': '1',
+            'ORIGIN_URL': 'https://origin.shizuha.com',
+            'FORGEJO_TOKEN': 'test-token',
+        }), mock.patch('requests.get', side_effect=trickle) as rget:
+            start = time.monotonic()
+            verdict = WorkflowService._prove_deployed_descends_from_merged_head(
+                'shizuha-labs', 'x', MERGED_SHA, 'd' * 40,
+            )
+            elapsed = time.monotonic() - start
+        self.assertFalse(verdict)
+        self.assertLess(elapsed, 3.0)
+        self.assertGreaterEqual(rget.call_count, 1)
+
+    def test_compare_wall_clock_refusal_fails_gate_closed(self):
+        # The deadline refusal converts into the gate's NORMAL fail-closed
+        # block (actionable WorkflowValidationError with missing evidence
+        # classes), not a worker kill and never a pass. Gate substance is
+        # unchanged: without proven ancestry the event does not correlate.
+        import time
+
+        def trickle(url, headers=None, timeout=None):
+            time.sleep(4)
+            return self._forgejo_compare_response(0)
+
+        item = self._item(
+            acceptance_mode='deployed',
+            prs=[self._merged_pr(sha=MERGED_SHA, merge_sha='f' * 40)],
+        )
+        self._deploy_event(item, commit_sha='d' * 40)
+
+        with mock.patch.dict(os.environ, {
+            'PULSE_COMPARE_WALL_CLOCK_SECONDS': '1',
+        }), mock.patch('requests.get', side_effect=trickle):
+            start = time.monotonic()
+            with self.assertRaises(WorkflowValidationError) as ctx:
+                WorkflowService._validate_deploy_verify_gate(item, 'done')
+            elapsed = time.monotonic() - start
+        msg = str(ctx.exception)
+        self.assertIn('missing_correlated_deploy_event', msg)
+        self.assertIn('missing evidence', msg)
+        self.assertLess(elapsed, 3.0)
+        item.refresh_from_db()
+        liveness = item.metadata['mechanism_liveness']['deploy_verify_gate']
+        self.assertEqual(liveness['last_result'], 'block')
+        self.assertIn(
+            'missing_correlated_deploy_event', liveness['missing_classes'],
+        )
+
+    def test_ci_only_files_api_trickle_falls_back_to_governed_path(self):
+        # A merged PR whose /files API trickles must NOT hold the gate past
+        # the wall-clock budget: the bounded-pool fetch is refused at the
+        # deadline, the CI-only class stays UNDETERMINED (None = unknown —
+        # never treated as proven CI-only), and the governed fail-closed path
+        # applies. Elapsed stays well under the trickle itself.
+        import time
+
+        files_calls = []
+
+        def trickle(url, headers=None, timeout=None):
+            if url.endswith('/files'):
+                files_calls.append(url)
+                time.sleep(4)  # trickle the FILES API leg specifically
+                return type('R', (), {'raise_for_status': lambda s: None,
+                                     'json': lambda s: [
+                                         {'filename': 'tests/test_x.py'},
+                                     ]})()
+            if url.endswith('/status'):
+                return type('R', (), {'raise_for_status': lambda s: None,
+                                     'json': lambda s: {'state': 'success'}})()
+            return self._forgejo_compare_response(0)
+
+        item = self._item(
+            acceptance_mode='deployed',
+            prs=[self._merged_pr(sha=MERGED_SHA, merge_sha='f' * 40)],
+        )
+        self._deploy_event(item, commit_sha='d' * 40)
+
+        with mock.patch.dict(os.environ, {
+            'PULSE_COMPARE_WALL_CLOCK_SECONDS': '1',
+        }), mock.patch('requests.get', side_effect=trickle):
+            start = time.monotonic()
+            with self.assertRaises(WorkflowValidationError) as ctx:
+                WorkflowService._validate_deploy_verify_gate(item, 'done')
+            elapsed = time.monotonic() - start
+        msg = str(ctx.exception)
+        self.assertIn('missing_correlated_deploy_event', msg)
+        self.assertEqual(len(files_calls), 1)
+        self.assertLess(elapsed, 3.0)
+        # Hermeticity: the stranded wire task holds its slot until its read
+        # finishes — wait for the pool to drain before yielding the fixture.
+        deadline = time.monotonic() + 6.0
+        from tasks.services import ci_only_evidence as _cie
+        while time.monotonic() < deadline and _cie._slots_in_flight() > 0:
+            time.sleep(0.1)
+        self.assertEqual(_cie._slots_in_flight(), 0)
+
+    def test_unrelated_transition_completes_despite_trickling_compare(self):
+        # While one item's gated compare trickles (bounded by the wall-clock
+        # deadline), an unrelated item's transition must still complete in
+        # full and fast — the refusing proof fails closed for ITS item only
+        # and never wedges transition capacity for the rest of the pile.
+        import time
+
+        def trickle(url, headers=None, timeout=None):
+            time.sleep(4)
+            return self._forgejo_compare_response(0)
+
+        gated = self._item(
+            acceptance_mode='deployed',
+            prs=[self._merged_pr(sha=MERGED_SHA, merge_sha='f' * 40)],
+        )
+        self._deploy_event(gated, commit_sha='d' * 40)
+        # Unrelated task: no linked PR, plain implementation-lane target.
+        other = self._item(prs='none', workflow_name='autonomous-bug')
+
+        with mock.patch.dict(os.environ, {
+            'PULSE_COMPARE_WALL_CLOCK_SECONDS': '1',
+        }), mock.patch('requests.get', side_effect=trickle):
+            other_start = time.monotonic()
+            self.assertTrue(
+                WorkflowService.validate_transition(
+                    other, 'in_progress', self._actor(),
+                )
+            )
+            other_elapsed = time.monotonic() - other_start
+        self.assertLess(other_elapsed, 1.0)
+        with self.assertRaises(WorkflowValidationError):
+            WorkflowService._validate_deploy_verify_gate(gated, 'done')
 
     def test_short_sha_prefix_does_not_match(self):
         # Rei P1-4: exact full-SHA correlation required. A short prefix is not

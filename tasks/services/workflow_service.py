@@ -15,6 +15,7 @@ Features:
 - Transition Screens: popup forms with required fields during transition
 """
 
+import threading
 import json
 import logging
 import hashlib
@@ -22,6 +23,8 @@ import os
 import re
 import urllib.parse
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 
 from django.core.cache import cache
@@ -3942,6 +3945,16 @@ class WorkflowService:
     _MISSING_SIGNOFF_RECEIPT = 'missing_signoff_receipt'
     # Role-gated waiver issuer teams (any tier membership).
     _DEPLOY_WAIVER_TEAMS = ('devops', 'admin-ops', 'qa')
+
+    # PLAT-11436: shared, bounded compare pool + in-flight counter. The slot
+    # is claimed before submit and released by the wire task itself when the
+    # Origin read finishes (including for reads whose caller already timed
+    # out), so slow Origin can never hold more slots than the pool size nor
+    # spawn more threads than max_workers.
+    _COMPARE_EXECUTOR = None
+    _COMPARE_SLOT_LOCK = threading.Lock()
+    _COMPARE_IN_FLIGHT = 0
+    _COMPARE_MAX_IN_FLIGHT = 4
     # Automation identities that must never issue or consume a waiver.
     _DEPLOY_VERIFY_AUTOMATION_EMAILS = frozenset({
         'system@shizuha.com', 'system@pulse', 'workflow@pulse',
@@ -5033,7 +5046,7 @@ class WorkflowService:
         return heads
 
     @staticmethod
-    def _merged_content_ci_only(item) -> bool:
+    def _merged_content_ci_only(item, budget_end=None) -> bool:
         """PLS-1249: True when EVERY merged linked PR touched only CI-only
         paths (tests/docs/CI-config). Derived from the merged content via the
         Forgejo files API — never labels — so it can never over-exempt
@@ -5054,16 +5067,19 @@ class WorkflowService:
             if not repo or not number or (repo, number) in seen:
                 continue
             seen.add((repo, number))
-            if pr_files_are_ci_only(repo, number) is not True:
+            if pr_files_are_ci_only(repo, number, budget_end=budget_end) is not True:
                 return False
         return bool(seen)
 
     @staticmethod
-    def _head_ci_green(head: dict) -> bool:
+    def _head_ci_green(head: dict, budget_end=None) -> bool:
         """PLS-1249: the merged head's combined commit status is success."""
         from .ci_only_evidence import head_ci_green
 
-        return head_ci_green(str(head.get('repo') or ''), str(head.get('sha') or ''))
+        return head_ci_green(
+            str(head.get('repo') or ''), str(head.get('sha') or ''),
+            budget_end=budget_end,
+        )
 
     @staticmethod
     def _awaiting_deploy_corrective_pr_snapshot(item):
@@ -5730,7 +5746,7 @@ class WorkflowService:
         return False
 
     @staticmethod
-    def _find_correlated_deploy_event(item, merged_heads):
+    def _find_correlated_deploy_event(item, merged_heads, budget_end=None):
         """Return best correlated prod DeploymentEvent, or None.
 
         Correlation requires: task key in source_task_keys, prod env, success
@@ -5905,6 +5921,7 @@ class WorkflowService:
                             proof_budget -= 1
                             verdict = WorkflowService._prove_deployed_descends_from_merged_head(
                                 parts[0], parts[1], head['sha'], deployed_sha,
+                                budget_end=budget_end,
                             )
                             proof_memo[proof_key] = verdict
                         if verdict:
@@ -5921,7 +5938,7 @@ class WorkflowService:
 
     @staticmethod
     def _prove_deployed_descends_from_merged_head(
-        owner, repo, base_sha, deployed_sha,
+        owner, repo, base_sha, deployed_sha, budget_end=None,
     ):
         """Fail-closed Origin commit-graph ancestry proof (PLS-904/PLAT-4573).
 
@@ -5950,6 +5967,25 @@ class WorkflowService:
         Unrelated SHAs, non-ancestors, unknown contracts, unauthenticated or
         unknown Origin base, or any fetch/parse failure return False — a
         network glitch never becomes deploy evidence.
+
+        PLAT-11436 (worker-timeout fan-out root), two structural fixes:
+
+        1. The compare leg runs on ONE SHARED, BOUNDED, module-level executor
+           (``_COMPARE_EXECUTOR``, max_workers=4) — never a new executor per
+           call. A per-call executor plus ``shutdown(wait=False)`` leaked one
+           stray trickling thread per timed-out compare, so slow Origin could
+           pile threads up unboundedly. The slot is claimed under
+           ``_COMPARE_SLOT_LOCK`` before submit and released by the wire task
+           itself when the Origin read finishes; when the pool is saturated,
+           further compares fail closed immediately — slow Origin can never
+           hold more than 4 slots nor spawn more than 4 threads.
+
+        2. The deadline comes from the CALLER: the gate evaluation establishes
+           ONE ``budget_end`` (a ``time.monotonic()`` absolute) for the whole
+           pass, not per compare (see ``_validate_deploy_verify_gate``).
+           Per-compare deadlines multiply across the candidate loop; a shared
+           absolute means once the budget is spent, remaining candidates are
+           refused without touching the wire.
         """
         base = WorkflowService._normalize_scm_sha(base_sha)
         head = WorkflowService._normalize_scm_sha(deployed_sha)
@@ -5957,6 +5993,104 @@ class WorkflowService:
             return False
         if base == head:
             return True  # exact identity (also handled by exact path)
+        import time as _time
+        now = _time.monotonic()
+        if budget_end is not None and now >= budget_end:
+            logger.warning(
+                "deploy-ancestry BUDGET-SPENT %s/%s compare/%s...%s: gate "
+                "evaluation budget exhausted — refusing without wire",
+                owner, repo, base[:7], head[:7],
+            )
+            return False
+        with WorkflowService._COMPARE_SLOT_LOCK:
+            if (
+                WorkflowService._COMPARE_IN_FLIGHT
+                >= WorkflowService._COMPARE_MAX_IN_FLIGHT
+            ):
+                logger.warning(
+                    "deploy-ancestry EXECUTOR-SATURATED %s/%s compare/%s...%s: "
+                    "%d compare(s) already in flight or stranded — failing "
+                    "closed without wire",
+                    owner, repo, base[:7], head[:7],
+                    WorkflowService._COMPARE_IN_FLIGHT,
+                )
+                return False
+            WorkflowService._COMPARE_IN_FLIGHT += 1
+        try:
+            future = WorkflowService._compare_executor().submit(
+                WorkflowService._compare_wire_task,
+                owner, repo, base, head,
+            )
+            timeout = (
+                max(budget_end - now, 0.0)
+                if budget_end is not None
+                else WorkflowService._resolve_wall_clock_seconds()
+            )
+            verdict = future.result(timeout=timeout)
+            return verdict
+        except FuturesTimeoutError:
+            logger.warning(
+                "deploy-ancestry REFUSAL %s/%s compare/%s...%s: cannot prove "
+                "ancestry — wall-clock budget %.1fs tripped (per-op socket "
+                "timeouts do not bound total elapsed time); failing closed",
+                owner, repo, base[:7], head[:7], timeout,
+            )
+            return False
+        except Exception:
+            # Any unexpected wire failure is NOT evidence of ancestry.
+            return False
+
+    @staticmethod
+    def _resolve_wall_clock_seconds():
+        try:
+            wall_clock = float(
+                os.environ.get('PULSE_COMPARE_WALL_CLOCK_SECONDS', '20')
+            )
+        except (TypeError, ValueError):
+            wall_clock = 20.0
+        return wall_clock if wall_clock > 0 else 20.0
+
+    @classmethod
+    def _compare_executor(cls):
+        """Lazy shared compare pool (module lifetime, bounded)."""
+        executor = cls._COMPARE_EXECUTOR
+        if executor is None:
+            with cls._COMPARE_SLOT_LOCK:
+                if cls._COMPARE_EXECUTOR is None:
+                    cls._COMPARE_EXECUTOR = ThreadPoolExecutor(
+                        max_workers=cls._COMPARE_MAX_IN_FLIGHT,
+                    )
+                executor = cls._COMPARE_EXECUTOR
+        return executor
+
+    @staticmethod
+    def _compare_wire_task(owner, repo, base, head):
+        """Wire task: run the compare and release its slot when done.
+
+        The slot is ALWAYS released here — including for compares whose
+        caller already timed out — so a trickling Origin read keeps exactly
+        one slot (and one thread) busy until it finishes, and never leaks.
+        """
+        try:
+            verdict, _definitive = WorkflowService._compare_ancestry_wire_leg(
+                owner, repo, base, head,
+            )
+            return verdict
+        finally:
+            with WorkflowService._COMPARE_SLOT_LOCK:
+                WorkflowService._COMPARE_IN_FLIGHT = max(
+                    WorkflowService._COMPARE_IN_FLIGHT - 1, 0,
+                )
+    @staticmethod
+    def _compare_ancestry_wire_leg(owner, repo, base, deployed):
+        """Raw Origin compare wire leg (PLS-904/PLAT-4573).
+
+        Runs inside the deadline worker thread. Returns
+        ``(verdict, definitive)``: ``definitive`` is True only when the
+        response contract was actually resolved (GitHub-shaped ``status``
+        seen, or Forgejo-shaped ``total_commits`` parsed) — a fetch failure
+        or contract-unknown payload is never definitive and never cached.
+        """
         origin_url = next((
             str(value).strip().rstrip('/')
             for value in (
@@ -5966,7 +6100,7 @@ class WorkflowService:
             if str(value or '').strip()
         ), '')
         if not origin_url:
-            return False
+            return False, False
         token = (
             os.environ.get('FORGEJO_TOKEN')
             or os.environ.get('ORIGIN_TOKEN')
@@ -5975,14 +6109,10 @@ class WorkflowService:
             or ''
         )
         if not token:
-            return False
-        owner = (owner or '').strip().strip('/')
-        repo = (repo or '').strip().strip('/')
-        if not owner or not repo:
-            return False
+            return False, False
         url = (
             f'{origin_url}/api/v1/repos/{owner}/{repo}/compare/'
-            f'{base}...{head}'
+            f'{base}...{deployed}'
         )
         try:
             import requests as _requests
@@ -5998,8 +6128,9 @@ class WorkflowService:
             response.raise_for_status()
             payload = response.json()
         except Exception:
-            # Any network/parse failure is NOT evidence of ancestry. Fail closed.
-            return False
+            # Any network/parse failure is NOT evidence of ancestry. Fail
+            # closed; the result is not definitive and is not cached.
+            return False, False
         status = str((payload or {}).get('status') or '').strip().lower()
         if not status:
             # Forgejo/Gitea-shaped compare: no ``status`` field exists. Prove
@@ -6007,7 +6138,7 @@ class WorkflowService:
             # rev-list(merged ^deployed) must be EMPTY.
             swapped_url = (
                 f'{origin_url}/api/v1/repos/{owner}/{repo}/compare/'
-                f'{head}...{base}'
+                f'{deployed}...{base}'
             )
             try:
                 swapped_response = _requests.get(
@@ -6022,19 +6153,22 @@ class WorkflowService:
                 swapped_payload = swapped_response.json()
             except Exception:
                 # Any network/parse failure is NOT evidence of ancestry.
-                return False
+                return False, False
             try:
                 swapped_total = int((swapped_payload or {}).get('total_commits'))
             except (TypeError, ValueError):
-                return False
-            return swapped_total == 0
+                # Contract unresolved (malformed payload): not definitive.
+                return False, False
+            return swapped_total == 0, True
         try:
             behind_by = int((payload or {}).get('behind_by') or 0)
         except (TypeError, ValueError):
             behind_by = -1
-        # `ahead`/`identical` with behind_by == 0 => deployed_sha contains base
+        # `ahead`/`identical` with behind_by == 0 => deployed contains base
         # (the merged head) in the canonical Origin commit graph.
-        return status in ('ahead', 'identical') and behind_by == 0
+        return (
+            status in ('ahead', 'identical') and behind_by == 0
+        ), True
 
     @staticmethod
     def _has_role_gated_deploy_waiver(item):
@@ -6751,7 +6885,9 @@ class WorkflowService:
         return item
 
     @staticmethod
-    def _collect_deploy_verify_missing(item, mode, *, evidence_path=None):
+    def _collect_deploy_verify_missing(
+        item, mode, *, evidence_path=None, budget_end=None,
+    ):
         """Return ordered list of named missing-evidence classes for ``mode``."""
         missing = []
         if WorkflowService._has_open_linked_prs(item):
@@ -6842,9 +6978,11 @@ class WorkflowService:
         # it can never over-exempt deploy-governed work; fail-closed on any
         # fetch error or ambiguous path. The verification evidence for this
         # class is the merged head's green CI run (combined commit status).
-        if merged_heads and ev is None and WorkflowService._merged_content_ci_only(item):
+        if merged_heads and ev is None and WorkflowService._merged_content_ci_only(
+            item, budget_end=budget_end,
+        ):
             if all(
-                WorkflowService._head_ci_green(head)
+                WorkflowService._head_ci_green(head, budget_end=budget_end)
                 for head in merged_heads
             ):
                 return missing
@@ -6897,7 +7035,7 @@ class WorkflowService:
             origin_heads = WorkflowService._merged_pr_heads(leg_origin)
             if origin_heads:
                 ev = WorkflowService._find_correlated_deploy_event(
-                    leg_origin, origin_heads,
+                    leg_origin, origin_heads, budget_end=budget_end,
                 )
             if ev is not None:
                 item_project = getattr(item, 'project', None)
@@ -6912,7 +7050,9 @@ class WorkflowService:
                 missing.append(WorkflowService._MISSING_MERGED_HEAD)
                 return missing
         elif merged_heads and ev is None:
-            ev = WorkflowService._find_correlated_deploy_event(item, merged_heads)
+            ev = WorkflowService._find_correlated_deploy_event(
+                item, merged_heads, budget_end=budget_end,
+            )
         if ev is None:
             missing.append(WorkflowService._MISSING_CORRELATED_DEPLOY)
             return missing
@@ -7268,13 +7408,31 @@ class WorkflowService:
             or (f"#{item.pk}" if getattr(item, 'pk', None) else 'this task')
         )
 
+        # PLAT-11436: ONE wall-clock budget per gate evaluation — not per
+        # compare call. The gate evaluates candidate (event, head) pairs in a
+        # loop; per-call deadlines multiply (N candidates × deadline), so the
+        # evaluation can exceed the worker timeout even when each compare
+        # honors its own budget. The budget is established here and handed to
+        # every compare; once spent, remaining candidates are refused without
+        # touching the wire.
+        import time as _time
+        try:
+            gate_budget = float(
+                os.environ.get('PULSE_COMPARE_WALL_CLOCK_SECONDS', '20')
+            )
+        except (TypeError, ValueError):
+            gate_budget = 20.0
+        if gate_budget <= 0:
+            gate_budget = 20.0
+        budget_end = _time.monotonic() + gate_budget
+
         # code mode: only the open-PR terminalization guard applies.
         # Non-governed and not service-affecting with no open PR → pass.
         evidence_path = WorkflowService._resolve_deploy_verify_evidence_path(
             item, mode,
         )
         missing = WorkflowService._collect_deploy_verify_missing(
-            item, mode, evidence_path=evidence_path,
+            item, mode, evidence_path=evidence_path, budget_end=budget_end,
         )
         if not missing:
             result = (
