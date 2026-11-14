@@ -1660,6 +1660,34 @@ class DeployVerifyGateV4Tests(TestCase):
         self.assertLess(elapsed, 3.0)
         self.assertGreaterEqual(rget.call_count, 1)
 
+    def test_compare_sync_wait_stays_under_gunicorn_arbiter(self):
+        # PLAT-13706: the gate budget (default 20s, and whatever the env sets)
+        # is longer than gunicorn's sync-worker patience. future.result() on
+        # the request thread must return inside _COMPARE_SYNC_WAIT_SECONDS so
+        # the arbiter abort (sys.exit) never kills the worker. A slow Origin
+        # is a fail-closed refusal, not a worker death.
+        import time
+
+        def trickle(url, headers=None, timeout=None):
+            time.sleep(30)
+            return self._forgejo_compare_response(0)
+
+        cap = WorkflowService._COMPARE_SYNC_WAIT_SECONDS
+        with mock.patch.dict(os.environ, {
+            'PULSE_COMPARE_WALL_CLOCK_SECONDS': '20',
+            'ORIGIN_URL': 'https://origin.shizuha.com',
+            'FORGEJO_TOKEN': 'test-token',
+        }), mock.patch('requests.get', side_effect=trickle):
+            start = time.monotonic()
+            verdict = WorkflowService._prove_deployed_descends_from_merged_head(
+                'shizuha-labs', 'x', MERGED_SHA, 'e' * 40,
+            )
+            elapsed = time.monotonic() - start
+        self.assertFalse(verdict)
+        self.assertLess(elapsed, cap + 2.0)
+        # The stranded wire task still owns its slot until the trickle ends.
+        # Do not assert the slot is free here; the next test drains the pool.
+
     def test_compare_wall_clock_refusal_fails_gate_closed(self):
         # The deadline refusal converts into the gate's NORMAL fail-closed
         # block (actionable WorkflowValidationError with missing evidence

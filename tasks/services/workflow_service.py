@@ -3955,6 +3955,11 @@ class WorkflowService:
     _COMPARE_SLOT_LOCK = threading.Lock()
     _COMPARE_IN_FLIGHT = 0
     _COMPARE_MAX_IN_FLIGHT = 4
+    # PLAT-13706: longest a sync request worker may block on one compare.
+    # Must stay under gunicorn's worker timeout (default 30s) so the arbiter
+    # never aborts the worker mid-request. The gate's overall budget can be
+    # longer; this only bounds a single future.result() wait.
+    _COMPARE_SYNC_WAIT_SECONDS = 8.0
     # Automation identities that must never issue or consume a waiver.
     _DEPLOY_VERIFY_AUTOMATION_EMAILS = frozenset({
         'system@shizuha.com', 'system@pulse', 'workflow@pulse',
@@ -6030,11 +6035,19 @@ class WorkflowService:
                 WorkflowService._compare_wire_task,
                 owner, repo, base, head,
             )
+            # PLAT-13706: the caller is a gunicorn SYNC worker. future.result()
+            # blocks that worker, and gunicorn's arbiter abort is sys.exit(1)
+            # — the request 500s with an empty body and the worker dies before
+            # any response (ingest and close both hit this). Cap the wait well
+            # under the arbiter heartbeat. The wire task still releases its
+            # slot when Origin eventually answers; a timed-out compare is a
+            # fail-closed refusal, never ancestry.
             timeout = (
                 max(budget_end - now, 0.0)
                 if budget_end is not None
                 else WorkflowService._resolve_wall_clock_seconds()
             )
+            timeout = min(timeout, WorkflowService._COMPARE_SYNC_WAIT_SECONDS)
             verdict = future.result(timeout=timeout)
             return verdict
         except FuturesTimeoutError:
