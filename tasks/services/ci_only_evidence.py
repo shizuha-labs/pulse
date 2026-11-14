@@ -16,7 +16,26 @@ from __future__ import annotations
 
 import fnmatch
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
+
+# PLAT-11436 review-3: the gate evaluation establishes ONE wall-clock budget
+# (``budget_end`` — a ``time.monotonic()`` absolute) and every wire leg under
+# it — the compare leg, these files/status fetches — shares it. Admission is
+# a module-level BOUNDED SEMAPHORE acquired non-blocking (no counter races
+# across threads); the slot is released by the wire task itself in its
+# ``finally`` (a timed-out read holds its slot until the read finishes); when
+# the pool is saturated the call refuses WITHOUT wire — slow Origin can never
+# hold more than 4 slots nor spawn more than 4 threads. _COMPLETED (lock-
+# guarded) is completion bookkeeping for hermetic test drains only.
+_MAX_IN_FLIGHT = 4
+_SLOT_SEM = threading.BoundedSemaphore(_MAX_IN_FLIGHT)
+_ACTIVE_LOCK = threading.Lock()
+_ADMITTED = 0
+_COMPLETED = 0
+_EXECUTOR: Optional[ThreadPoolExecutor] = None
+_DEFAULT_FALLBACK_SECONDS = 20.0
 
 # Conservative CI-only path classes. Deliberately narrow: a path that is not
 # unambiguously test/doc/CI-config keeps the governed path.
@@ -89,6 +108,57 @@ def _http_json(url: str) -> Optional[object]:
         return None
 
 
+def _executor() -> ThreadPoolExecutor:
+    global _EXECUTOR
+    if _EXECUTOR is None:
+        _EXECUTOR = ThreadPoolExecutor(max_workers=_MAX_IN_FLIGHT)
+    return _EXECUTOR
+
+
+def _run_and_release(fn):
+    try:
+        return fn()
+    finally:
+        global _COMPLETED
+        with _ACTIVE_LOCK:
+            _COMPLETED += 1
+        _SLOT_SEM.release()
+
+
+def _slots_in_flight():
+    """Slots currently claimed = acquired minus released-and-completed."""
+    import threading as _t
+    # BoundedSemaphore exposes no portable counter; derive from completions
+    # vs admissions via a lock-guarded counter pair.
+    with _ACTIVE_LOCK:
+        return _ADMITTED - _COMPLETED
+
+
+def _budget_call(fn, budget_end):
+    """Run ``fn`` under the shared wall-clock budget. Returns the result, or
+    None when the budget is spent, the pool is saturated, or the call tripped
+    the deadline — every None is a fail-closed 'unknown' for the caller."""
+    global _ADMITTED
+    import time as _time
+    now = _time.monotonic()
+    if budget_end is not None and now >= budget_end:
+        return None
+    if not _SLOT_SEM.acquire(blocking=False):
+        return None
+    with _ACTIVE_LOCK:
+        _ADMITTED += 1
+    future = _executor().submit(_run_and_release, fn)
+    timeout = (
+        max(budget_end - now, 0.0)
+        if budget_end is not None
+        else _DEFAULT_FALLBACK_SECONDS
+    )
+    try:
+        return future.result(timeout=timeout)
+    except Exception:
+        return None
+
+
 def _path_is_ci_only(path: str) -> bool:
     p = (path or '').strip()
     if p.startswith('./'):
@@ -110,13 +180,15 @@ def _path_is_ci_only(path: str) -> bool:
     return False
 
 
-def pr_files_are_ci_only(repo_full_name: str, pr_number: int) -> Optional[bool]:
+def pr_files_are_ci_only(
+    repo_full_name: str, pr_number: int, budget_end=None,
+) -> Optional[bool]:
     """True when EVERY changed file in the PR is CI-only; False when any is
     not; None when the fetch failed (unknown — callers fail closed)."""
     if not repo_full_name or not pr_number:
         return None
     url = f'{_forgejo_api_url()}/repos/{repo_full_name}/pulls/{int(pr_number)}/files'
-    files = _http_json(url)
+    files = _budget_call(lambda: _http_json(url), budget_end)
     if not isinstance(files, list) or not files:
         return None  # empty/failed fetch is unknown, not CI-only
     if len(files) >= _FILES_CAP:
@@ -128,12 +200,12 @@ def pr_files_are_ci_only(repo_full_name: str, pr_number: int) -> Optional[bool]:
     return True
 
 
-def head_ci_green(repo_full_name: str, sha: str) -> bool:
+def head_ci_green(repo_full_name: str, sha: str, budget_end=None) -> bool:
     """True when the combined commit status for the merged head is success."""
     if not repo_full_name or not sha:
         return False
     url = f'{_forgejo_api_url()}/repos/{repo_full_name}/commits/{sha}/status'
-    data = _http_json(url)
+    data = _budget_call(lambda: _http_json(url), budget_end)
     if not isinstance(data, dict):
         return False
     return str(data.get('state') or '').strip().lower() == 'success'
