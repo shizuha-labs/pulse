@@ -86,6 +86,19 @@ class OrphanReviewLaneSweepTests(TestCase):
         it.refresh_from_db()
         self.assertIn(it.status, ('todo', 'open', 'in_progress'))
         self.assertTrue(Comment.objects.filter(item=it, content__icontains='Orphan review-lane sweep').exists())
+        ids = (it.metadata or {}).get('open_change_request_ids')
+        self.assertEqual(ids, [f'orphan-sweep:{it.pk}'])
+        from tasks.services.workflow_service import WorkflowService
+        url = 'https://origin.shizuha.com/shizuha-labs/pulse/pulls/1'
+        it.metadata = {
+            **(it.metadata or {}),
+            'pull_requests': [{'url': url, 'head_sha': 'abc', 'status': 'open'}],
+            'review_bounce_pr_heads': {url: 'abc'},
+        }
+        ok, detail = WorkflowService._reviewer_pass_dispositions_open_requests(
+            it, {'comment': 'PLAT-10330 disposition: all open change-requests'},
+        )
+        self.assertTrue(ok, detail)
 
     def test_recent_in_review_is_left_alone(self):
         it = _make_item(self.project, title='[Regression watchlist] fresh svc', age_days=0.1)
