@@ -224,6 +224,17 @@ def _bind_or_create_task(*, originating_task: Item, organization: str, environme
     ).select_related('focused_qa_task').order_by('-created_at').first()
     if existing is not None:
         return existing.focused_qa_task
+    # A retry can land before the generation row is inserted (the direct
+    # bind path, and a crash between Item.create and FocusedQAGeneration).
+    # Reuse the already-stamped verification task instead of minting a second
+    # leg for the same origin.
+    existing_task = Item.objects.filter(
+        source='focused-qa-automation',
+        source_id=str(originating_task.pk),
+        item_type='task.focused_qa',
+    ).order_by('pk').first()
+    if existing_task is not None:
+        return existing_task
     project = originating_task.project
     title = f'Focused QA verification: {originating_task.item_key or originating_task.title}'[:400]
     # PLS-825 (HLD §6 step 6/7): bind to the dedicated focused-qa workflow when
@@ -249,8 +260,14 @@ def _bind_or_create_task(*, originating_task: Item, organization: str, environme
         workflow_name=_focused_qa_workflow_name(),
         created_by_id=0,
         created_by_email='qa-automation@shizuha.com',
-        labels={'source': 'focused-qa', 'risk_label': 'requires-live-qa'},
-        tags='focused-qa',
+        # PLS-1393: a focused-QA verification leg is a no-code evidence pack.
+        # Stamp the `no-pr` classification AT GENERATION so every downstream
+        # no-pr-aware gate (merge-SoD skip, artifact classification, bounce
+        # independence) sees it from the start instead of after a reviewer's
+        # manual correction. Existing structured source/risk labels are
+        # preserved — this appends, never rebuilds, the label set.
+        labels={'source': 'focused-qa', 'risk_label': 'requires-live-qa', 'no-pr': True},
+        tags='focused-qa,no-pr',
         metadata={'focused_qa_origin_item_id': str(originating_task.pk), **metadata},
     )
 
