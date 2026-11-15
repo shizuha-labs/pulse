@@ -4159,6 +4159,23 @@ class WorkflowService:
         )
 
     @staticmethod
+    def _item_has_linked_pr(item):
+        """True when the item carries a schema-declared linked PR/review source.
+
+        Mirrors focused_qa_verifier._has_pr_metadata (never inferred from the
+        title): a `pull_requests` metadata list, or an explicit pr/review/source
+        URL key. PLS-1393 uses this to distinguish no-code verification legs
+        from code carriers, whose bounces legitimately return to their author.
+        """
+        meta = getattr(item, 'metadata', None) or {}
+        if not isinstance(meta, dict):
+            return False
+        prs = meta.get('pull_requests')
+        if isinstance(prs, list) and prs:
+            return True
+        return bool(meta.get('pr_url') or meta.get('review_url') or meta.get('source_url'))
+
+    @staticmethod
     def _focused_qa_leg_origin(item):
         """The leg's originating task per the ingest's own spawn metadata.
 
@@ -14751,6 +14768,23 @@ class WorkflowService:
                         context, context_error = (
                             WorkflowService._legacy_implementation_return_context(item)
                         )
+                    # PLS-1393: a focused-QA verification leg is a no-code
+                    # evidence pack. Bouncing its COMPLETED evidence back to
+                    # its verification author as fresh work violates review
+                    # independence (CON-495 cycled Review→author→QA
+                    # re-assertion exactly this way), and genuine evidence
+                    # corrections already own a dedicated disposition
+                    # ('Return Evidence for Correction'). Void the author
+                    # return context so the durable ladder routes the leg to
+                    # the focused-QA lane queue (focused_qa_assignment_group,
+                    # group-queue seat) instead of the author's concrete seat.
+                    if (
+                        context
+                        and str(getattr(item, 'source', '') or '').startswith('focused-qa')
+                        and not WorkflowService._item_has_linked_pr(item)
+                    ):
+                        context = None
+                        context_error = 'focused_qa_no_pr_independent_disposition'
                     # PLS-686: a change-request bounce may pre-route the item
                     # with ``assign_team`` before ``assign_implementer``.  When
                     # the historical return context is missing/invalid, that
@@ -14850,6 +14884,25 @@ class WorkflowService:
                             uid = branch_decision.get('owner_id')
                             email = branch_decision.get('owner_email')
                             via = 'origin_branch_owner'
+                        elif (
+                            branch_decision.get('reason_code')
+                            == 'origin_author_lookup_unavailable'
+                            and context
+                            and implementer.get('id')
+                            and implementer.get('email')
+                        ):
+                            # PLS-1393: a code-shaped focused-QA leg still has a
+                            # recorded implementer. When Origin author lookup is
+                            # down (CI has no ID), do not hold the bounce — the
+                            # versioned return context is the durable owner.
+                            # Ambiguous or unresolved authors still hold.
+                            uid = implementer.get('id')
+                            email = implementer.get('email')
+                            via = 'recorded_lookup_unavailable'
+                            if group:
+                                item.assignment_group = group
+                                if 'assignment_group' not in update_fields:
+                                    update_fields.append('assignment_group')
                         else:
                             # Preserve the proved implementation lane for the
                             # typed branch hold, but never select a random seat.
@@ -14973,7 +15026,14 @@ class WorkflowService:
                         # group-routed hold. Never preserve the review/merge owner.
                         hold_code = context_error or 'no_routable_return_candidate'
                         if not has_active_origin_pr:
-                            item.unassign(save=False, reason='routability_hold')
+                            # PLS-1393: unassign() arms a one-use clear receipt
+                            # for the pre-clear lane. The focused-QA no-code
+                            # bounce then changes assignment_group in the same
+                            # save, so that receipt no longer matches and the
+                            # transition dies on the PLS-467 outbox check.
+                            # Clear the concrete seat in memory; the single
+                            # Item.save below is the guarded write.
+                            item.assignee_id = None
                             item.assignee_email = ''
                             for field in ('assignee_id', 'assignee_email'):
                                 if field not in update_fields:
