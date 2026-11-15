@@ -16032,8 +16032,27 @@ class WorkflowService:
         # PLS-737: admission uses the raising classifier via _reserve_wip_slot;
         # guard-style reads here only decide whether to attempt a reservation.
         try:
+            # PLAT-12210: admission must use the capacity classifier for the
+            # TARGET slot, not the focus-guard one. _slot_kind_for_status keeps
+            # in_review / in_qa / awaiting_merge as 'active' so a DB fault
+            # cannot reclassify them (PLS-737). _capacity_slot_kind_for_status
+            # already treats that review pipeline as not hands-on. Using the
+            # focus kind for new_slot filled a seat's active cap with items
+            # another seat drains, and WIP_ACTIVE_CAPACITY_DENIED then blocked
+            # the transition into review.
+            #
+            # old_slot stays on the FOCUS classifier: this gate only decides
+            # whether the transition mints a FRESH active-slot claim for the
+            # current assignee. A seat leaving the review pipeline
+            # (in_review -> in_progress) already occupies an active executing
+            # seat (focus semantics, PLS-737) — demoting old_slot made the
+            # bounce-hold path (PLS-474) mint a reservation for the source
+            # assignee, whose post-function then clears the assignee and
+            # Item.save() verification raised wip_reservation_target_mismatch
+            # (the exact PLS-846 hazard shape: never reserve against a lane
+            # the post-function is about to reroute away).
             old_slot = WorkflowService._slot_kind_for_status(original_status)
-            new_slot = WorkflowService._slot_kind_for_status(resolved_status)
+            new_slot = WorkflowService._capacity_slot_kind_for_status(resolved_status)
         except CapacityClassificationUnavailable as exc:
             raise WorkflowValidationError(
                 'Capacity classification is temporarily unavailable; '
@@ -22109,6 +22128,10 @@ class WorkflowService:
         # These are the concrete executing/reviewing/merging seats.  Other
         # non-terminal states are assigned-ready work.
         if status_slug in WorkflowService._WORKING_STATUSES:
+            # Review-pipeline slugs stay 'active' here on purpose (PLS-737:
+            # a DB fault must not reclassify a working status). Capacity
+            # admission uses _capacity_slot_kind_for_status, which demotes
+            # them (PLAT-12210).
             return 'active'
         # Canonical ready-queue slugs used across resolver/probe paths and
         # mirrored in ``_slot_statuses('ready')``. Short-circuit so a missing
