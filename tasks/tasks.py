@@ -11232,6 +11232,13 @@ def _reclaim_wip_overload():
                     transition = None
                     if wf:
                         todo_slugs = set(Status.objects.filter(category='todo').values_list('slug', flat=True))
+                        # PLS-1021/_guard_resolved_elsewhere: 'Resolved Elsewhere'
+                        # is authority-gated to blocker children.  A batch
+                        # stale-progress repair must never route through it —
+                        # stopping stale work is not an authority declaration —
+                        # and if it were the first-position todo transition the
+                        # guard would abort the item's recovery entirely.
+                        todo_slugs.discard('resolved_elsewhere')
                         transition = (
                             WorkflowTransition.objects.filter(
                                 workflow=wf,
@@ -12922,18 +12929,21 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                         if not WorkflowService._seat_assignment_allowed(verdict):
                             candidate_reasons.append((e, verdict.reasons))
                             continue
-                        if _cap_enforced_pod and not WorkflowService._assignment_ignores_wip_cap(it):
-                            # PLS-1433: shared capacity verdict. A None verdict
-                            # (no roster config for the resolved org) must
-                            # defer to the legacy counters exactly as the
-                            # shadow branch below does — treating None as
-                            # under-cap let a pull land on a seat the cap
-                            # would return (run-9395 signature).
+                        # PLS-1433: consult the shared capacity verdict
+                        # UNCONDITIONALLY. The returner sheds on the strictest
+                        # cap across EVERY enforced roster the seat sits on,
+                        # but `_cap_enforced_pod` only reflects the pod's own
+                        # roster row — gating the verdict on it let a pull
+                        # land on a seat a differently-keyed enforced roster
+                        # would return (the residual post-#1004 ichi loop).
+                        # None (no roster policy for the resolved org) still
+                        # defers to the legacy counters exactly as before.
+                        if not WorkflowService._assignment_ignores_wip_cap(it):
                             seat_full = WorkflowService._slot_at_capacity(
                                 it, pod, e, user_id=uid,
                             )
                             if seat_full is None:
-                                if WorkflowService._at_capacity(
+                                if _cap_enforced_pod and WorkflowService._at_capacity(
                                     active_load[uid], inflight_load[uid],
                                 ):
                                     continue
@@ -12972,17 +12982,20 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                         if not WorkflowService._seat_satisfies_required_capability(e, _required_caps, item=it):
                             _capability_skips.append(e)
                             continue
-                        if _cap_enforced_pod and not WorkflowService._assignment_ignores_wip_cap(it):
-                            # PLS-1433: shared capacity verdict — the same
-                            # assigned-ready/active counts the reservation path
-                            # enforces, so a seat the cap would reject is never
-                            # a pull target. Without a roster config, defer to
-                            # the legacy process-wide counters (PLS-380).
+                        # PLS-1433: shared capacity verdict — the same
+                        # assigned-ready/active counts the reservation path
+                        # enforces, so a seat the cap would reject is never
+                        # a pull target. Consulted UNCONDITIONALLY (see the
+                        # enforced branch above): the returner's strictest-
+                        # cap-across-rosters policy is not reflected in
+                        # `_cap_enforced_pod`. None still defers to the
+                        # legacy counters when the pod enforces caps.
+                        if not WorkflowService._assignment_ignores_wip_cap(it):
                             seat_full = WorkflowService._slot_at_capacity(
                                 it, pod, e, user_id=uid,
                             )
                             if seat_full is None:
-                                if WorkflowService._at_capacity(active_load[uid], inflight_load[uid]):
+                                if _cap_enforced_pod and WorkflowService._at_capacity(active_load[uid], inflight_load[uid]):
                                     continue
                             elif seat_full:
                                 continue
