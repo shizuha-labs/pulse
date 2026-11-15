@@ -17281,6 +17281,17 @@ def sweep_orphan_review_lane(self):
                         author_name='Orphan Review-Lane Sweep',
                     )
                     fresh.refresh_from_db()
+                    # PLAT-11727: the bounce creates the change-request disposition
+                    # obligation. The reviewer-pass gate treats a missing or empty
+                    # open_change_request_ids list as parse ambiguity, so mint a
+                    # parseable id at bounce time when the snapshot left none.
+                    meta = dict(fresh.metadata or {})
+                    existing = meta.get('open_change_request_ids')
+                    if not isinstance(existing, list) or not [i for i in existing if str(i).strip()]:
+                        key = fresh.item_key or str(fresh.pk)
+                        meta['open_change_request_ids'] = [f'orphan-sweep:{key}']
+                        fresh.metadata = meta
+                        fresh.save(update_fields=['metadata', 'updated_at'])
                     bounced.append({'key': fresh.item_key or str(fresh.pk), 'status': fresh.status})
             except Exception as exc:
                 logger.warning('sweep_orphan_review_lane: %s failed: %s',
