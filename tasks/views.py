@@ -15,7 +15,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.utils import timezone
 from django.db.models import Q, Count, Case, When, Value, IntegerField, F, Max, OuterRef, Subquery
-from django.db.models.functions import Coalesce, JSONObject
+from django.db.models.functions import Coalesce, JSONObject, Cast
 from django.db.models.fields.json import KeyTextTransform
 from django.db import IntegrityError, OperationalError, transaction
 from datetime import datetime, timedelta
@@ -2661,7 +2661,16 @@ class ItemViewSet(viewsets.ModelViewSet):
             ]
             if affinity_rank is not None:
                 order_fields.append('_project_affinity_rank')
-            order_fields.extend(['_queue_stage_rank', 'created_at', 'id'])
+            # PLAT-10644: explicit pull_rank in metadata sorts ahead of FIFO
+            # inside the same ready/priority/stage bucket. Absent rank sorts last.
+            queryset = queryset.annotate(
+                _queue_pull_rank=Coalesce(
+                    Cast(KeyTextTransform('pull_rank', 'metadata'), IntegerField()),
+                    Value(1000),
+                    output_field=IntegerField(),
+                ),
+            )
+            order_fields.extend(['_queue_stage_rank', '_queue_pull_rank', 'created_at', 'id'])
             return self._list_defer_fat_columns(queryset.order_by(*order_fields))
 
         return self._list_defer_fat_columns(queryset.order_by('-created_at'))

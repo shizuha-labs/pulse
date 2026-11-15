@@ -22988,10 +22988,18 @@ class WorkflowService:
             # effect-terminal for assignment — never capacity-pull it.
             and not WorkflowService._is_assignment_effect_terminal(it)
         ]
+        def _pull_rank(it):
+            raw = (it.metadata or {}).get('pull_rank') if isinstance(it.metadata, dict) else None
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return 1000
+
         queued.sort(key=lambda it: (
             0 if it._queue_is_blocker_root else 1,
             it._queue_effective_priority_rank,
             queue_stage_rank_value(it.status),
+            _pull_rank(it),
             it.created_at,
             it.id,
         ))
