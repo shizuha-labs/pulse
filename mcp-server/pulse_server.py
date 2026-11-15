@@ -733,6 +733,53 @@ ACTIVE_WORK_STATUSES = frozenset({
 })
 
 
+def _normalize_tags(tags) -> Optional[str]:
+    """PLS-536: canonical wire form for `tags` is a comma-separated string
+    (the API field is a comma-separated TextField). The tool schema advertises
+    string OR array, so the boundary must normalize BOTH to the canonical form
+    — previously an array was passed through raw and the serializer rejected
+    it with "Not a valid string".
+
+    Accepts: a Python list/tuple of strings, a JSON-encoded array string, or a
+    comma-separated string. Elements are whitespace-stripped; empties dropped;
+    duplicates removed case-insensitively preserving first-seen order.
+    Returns the canonical comma-separated string ("" clears), or raises
+    ValueError with a field-specific message for invalid types.
+    """
+    if tags is None:
+        return None
+    items = None
+    if isinstance(tags, str):
+        s = tags.strip()
+        if not s:
+            return ""
+        try:
+            parsed = json.loads(s)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            items = parsed
+        else:
+            items = s.split(",")
+    elif isinstance(tags, (list, tuple)):
+        items = list(tags)
+    else:
+        raise ValueError(
+            f"tags: expected a string or an array of strings, got {type(tags).__name__}"
+        )
+    out, seen = [], set()
+    for element in items:
+        if not isinstance(element, str):
+            raise ValueError(
+                f"tags: array elements must be strings, got {type(element).__name__}"
+            )
+        t = element.strip()
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
+            out.append(t)
+    return ",".join(out)
+
+
 def _normalize_task_title(title: str) -> str:
     import re
     return re.sub(r'[^a-z0-9]+', ' ', (title or '').lower()).strip()
@@ -2179,7 +2226,7 @@ def create_task(
         due_date: ISO format date (e.g., '2024-03-15T17:00:00Z')
         story_points: Story point estimate
         labels: Labels — accepts a list (["frontend","bug"]), a comma-separated string ("frontend,bug"), or a single string ("bug"). All are normalized to a list.
-        tags: Tags — accepts a list or a comma-separated string.
+        tags: Tags — accepts a list (["a","b"]), a JSON array string, or a comma-separated string ("a,b"). Normalized to a canonical comma-separated string (trimmed, deduped).
         sprint_id: Sprint ID to add to
         component_id: Component ID
         parent_item_id: Parent task ID/PK or human task key (e.g. PLAT-123) (creates sub-task)
@@ -2320,17 +2367,19 @@ def create_task(
             for p in conflicted_parties
             if p is not None and str(p).strip()
         ]
-    if tags:
-        # Item.tags is a comma-separated TextField. The MCP contract accepts a
-        # native JSON array as well as the legacy string form, so normalize the
-        # array before crossing the HTTP boundary instead of letting DRF reject
-        # it with ``tags: Not a valid string``.
-        if isinstance(tags, list):
-            data["tags"] = ",".join(
-                tag.strip() for tag in tags if isinstance(tag, str) and tag.strip()
-            )
-        else:
-            data["tags"] = tags
+    if tags is not None:
+        # PLS-536: normalize string-or-array to the canonical comma-separated
+        # form the API validates — raw arrays 400 with "Not a valid string".
+        # Supersedes the earlier inline list-join: this path also accepts
+        # JSON-encoded array strings, dedups case-insensitively, and raises a
+        # field-specific ValueError for non-string elements instead of
+        # letting DRF emit a generic 400.
+        try:
+            normalized_tags = _normalize_tags(tags)
+        except ValueError as exc:
+            return f"Error: {exc}"
+        if normalized_tags is not None:
+            data["tags"] = normalized_tags
     if workflow: data["workflow_name"] = workflow
     if item_type: data["item_type"] = item_type
     if labels:
@@ -2569,7 +2618,7 @@ def update_task(
         frequency: Recurrence frequency (daily, weekly, monthly, yearly, custom). Use custom for sub-daily intervals.
         recurrence_pattern: Custom recurrence pattern, e.g. "every 8 hours" or JSON interval keys. Cron strings are not supported.
         labels: New labels — accepts a list (["a","b"]), a comma-separated string ("a,b"), or a single string ("a"). All are normalized to a list.
-        tags: New tags (comma-separated)
+        tags: New tags — accepts a list, a JSON array string, or a comma-separated string; normalized to a canonical comma-separated string. ""/[] clears.
         sprint_id: Move to sprint (UUID)
         component_id: Set component (UUID)
         resolution: Set resolution (e.g., 'fixed', 'wontfix', 'duplicate')
@@ -2616,7 +2665,12 @@ def update_task(
         data["frequency"] = effective_frequency
         data["recurrence_pattern"] = effective_pattern
 
-    if tags is not None: data["tags"] = tags
+    if tags is not None:
+        # PLS-536: same canonical normalization as create_task; "" / [] clear.
+        try:
+            data["tags"] = _normalize_tags(tags)
+        except ValueError as exc:
+            return f"Error: {exc}"
     if sprint_id is not None: data["sprint"] = sprint_id
     if component_id is not None: data["component"] = component_id
     if resolution is not None: data["resolution"] = resolution

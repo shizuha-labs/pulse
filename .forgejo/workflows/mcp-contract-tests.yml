@@ -169,6 +169,7 @@ jobs:
                         cd mcp-server && python -m unittest \
                           test_work_logs \
                           test_link_issues \
+                          test_pls536_tags_contract \
                           test_deploy_verify_waiver \
                           test_plat4675_link_pr_host_binding \
                           test_plat1004_classifier_guard \
