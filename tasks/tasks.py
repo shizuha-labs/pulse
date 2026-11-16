@@ -3746,7 +3746,56 @@ def send_alert_notification(self, alert_id):
             )
             return f"Alert {alert_id} has no notification recipients"
 
-        results = notification_service.notify_alert(alert, user_ids=recipient_ids)
+        # PLAT-12617: the pulse-internal mode=alert Items path had NO class-key
+        # dedup at all — every event that re-fired this task (estate relabels,
+        # item transitions, rebalance churn, Celery redeliveries) re-paged
+        # every recipient on every channel (12k+ duplicate notifications/day;
+        # 3,607 copies of one AgentRuntimeEstateSingleDown item to a single
+        # user in 24h). Apply the same reservation discipline the Alertmanager
+        # webhook path uses (`_dm_alertmanager_firing`): one DM per class per
+        # TTL window, Redis SET NX shared across pods, TTL refreshed while the
+        # reservation is held. Severity is part of the key, so a genuine
+        # escalation still pages; per-item identity avoids the PLS-712
+        # dual-shape label hazard entirely.
+        ttl = int(
+            getattr(settings, 'PULSE_ALERT_DM_DEDUP_SECONDS', 3600)
+            or 3600
+        )
+        class_key = _alert_item_dm_class_key(alert)
+        reservation = hashlib.sha256(
+            f"{class_key}|{time.time_ns()}".encode('utf-8')
+        ).hexdigest()
+        reservation_client = _reserve_alert_dm(class_key, reservation, ttl)
+        if reservation_client is None:
+            _touch_alert_dm(class_key, ttl)
+            logger.info(
+                "Alert %s notification deduped (class key held) key_digest=%s",
+                alert_id,
+                hashlib.sha256(class_key.encode('utf-8')).hexdigest()[:16],
+            )
+            return f"Alert {alert_id} notification deduped (class key held)"
+
+        try:
+            results = notification_service.notify_alert(alert, user_ids=recipient_ids)
+        except Exception:
+            # Nothing was delivered if notify_alert raised — release the
+            # reservation so the retry (Celery or operator) is not eaten by
+            # the TTL.
+            _release_alert_dm_reservation(
+                class_key, reservation, client=reservation_client,
+            )
+            raise
+        if (
+            not results.get('success')
+            and not results.get('connect_success')
+            and not results.get('connect_deferred')
+        ):
+            # Total delivery failure on every channel: release so the next
+            # legitimate attempt can page. A partial success holds the
+            # reservation — the class was paged.
+            _release_alert_dm_reservation(
+                class_key, reservation, client=reservation_client,
+            )
 
         if results.get('success', 0) > 0 or results.get('connect_success', 0) > 0:
             logger.info(
@@ -3764,6 +3813,26 @@ def send_alert_notification(self, alert_id):
     except Exception as e:
         logger.error(f"Error sending alert notification for alert {alert_id}: {e}")
         raise
+
+
+def _alert_item_dm_class_key(alert) -> str:
+    """Class key for the pulse-internal mode=alert Items DM path (PLAT-12617).
+
+    The Alertmanager webhook path dedups by (source, kind, alertname,
+    severity, team); this path's storm comes from the SAME alert Item being
+    re-notified by unrelated events, so the item itself is the class proxy.
+    Per-item keys avoid the PLS-712 dual-shape label hazard (array-shaped
+    labels would collapse unrelated alerts into one 'unknown' class) and keep
+    the key stable under label churn. Severity stays in the key so a genuine
+    escalation re-pages; kind separates the resolve DM from the firing page.
+    """
+    status = str(getattr(alert, 'status', '') or '').strip().lower()
+    kind = 'resolved' if status in ('resolved', 'closed', 'done') else 'firing'
+    severity = str(getattr(alert, 'severity', None) or 'warning').strip().lower() or 'warning'
+    source = str(getattr(alert, 'source', None) or 'pulse').strip() or 'pulse'
+    return (
+        f"pulse:alert_dm_class:{source}:item:{alert.id}:{kind}:{severity}"
+    )
 
 
 def _alertmanager_persist_items() -> bool:
