@@ -2996,7 +2996,7 @@ def reject_action(task_id: str, reason: str = "") -> str:
 
 
 @mcp.tool(name="pulse_issue_deploy_verify_waiver")
-def issue_deploy_verify_waiver(task_id: str, reason: str = "") -> str:
+def issue_deploy_verify_waiver(task_id: str, reason: str = "", evidence: dict | None = None) -> str:
     """
     Issue a role-gated deploy-verify waiver on a task (PLS-675 / PLAT-1351 v4).
 
@@ -3009,10 +3009,17 @@ def issue_deploy_verify_waiver(task_id: str, reason: str = "") -> str:
     Args:
         task_id: Item/task ID (UUID or key, e.g. 'TRD-34')
         reason: Required non-empty reason for the waiver
+        evidence: Required PLAT-8177 envelope. Either
+            {"kind": "inline_package", "actor", "originating_key", "reason",
+             "target_head", "verdict_refs": [...], "scope_conditions": [...]}
+            or {"kind": "trail_pointer", "record_kind", "record_id",
+                "content_address": "sha256:<64 hex>"}.
     """
     data = {}
     if reason:
         data["reason"] = reason
+    if evidence:
+        data["evidence"] = evidence
     # No user-delegation token: call with the agent's own token and let
     # Pulse's PLS-675 roster check decide. Team membership is not in the
     # Shizuha ID JWT. A present delegation still acts as that user.
