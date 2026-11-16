@@ -2906,6 +2906,51 @@ class AtomicWipAdmissionTests(TransactionTestCase):
         self.assertIsInstance(first.get('moves'), int)
         self.assertIsInstance(second.get('moves'), int)
 
+    def test_pls1391_blank_group_ready_overflow_returns_to_roster_team(self):
+        """Direct-assign rows with a null group must not bounce to team None."""
+        from tasks.models import Comment, Item, ItemActivity, TeamRoster
+
+        TeamRoster.objects.filter(
+            organization_id=1, team_name='review',
+        ).update(ready_wip_cap=1, active_wip_cap=5, wip_enforced=True)
+        Item.objects.create(
+            title='kept ready',
+            mode='task',
+            status='open',
+            priority='urgent',
+            assignment_group='review',
+            assignee_id=self.UID,
+            assignee_email=self.EMAIL,
+            workflow_name='autonomous-dev',
+            project=self.project,
+        )
+        overflow = Item.objects.create(
+            title='direct-assigned overflow',
+            mode='task',
+            status='open',
+            priority='normal',
+            assignment_group=None,
+            assignee_id=self.UID,
+            assignee_email=self.EMAIL,
+            workflow_name='autonomous-dev',
+            project=self.project,
+        )
+        result = _reclaim_wip_overload()
+        overflow.refresh_from_db()
+        self.assertGreaterEqual(result['ready_queued'], 1)
+        self.assertEqual(overflow.assignment_group, 'review')
+        self.assertIsNone(overflow.assignee_email)
+        comment = Comment.objects.filter(
+            item=overflow, author_email='system@pulse',
+        ).latest('created_at')
+        self.assertIn('**review**', comment.content)
+        self.assertNotIn('None', comment.content)
+        activity = ItemActivity.objects.filter(
+            item=overflow, action='unassigned',
+        ).first()
+        if activity is not None:
+            self.assertEqual(activity.user_email, 'system@pulse')
+
 
 _UIDS = {'ryo@shizuha.com': 1, 'jun@shizuha.com': 2, 'kai@shizuha.com': 3, 'sara@shizuha.com': 4}
 
