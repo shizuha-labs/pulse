@@ -51,6 +51,30 @@ class DeployVerifyWaiverMcpTests(unittest.TestCase):
         self.assertIn("Deploy-verify waiver issued on [TRD-34]", out)
         self.assertIn("receipt.deploy_verify_waiver", out)
 
+    def test_evidence_envelope_is_forwarded(self):
+        seen = {}
+        evidence = {
+            "kind": "inline_package",
+            "actor": "hritik@shizuha.com",
+            "originating_key": "FIN-68",
+            "reason": "mika PASS, finance#71 merged",
+            "target_head": "66727d431679",
+            "verdict_refs": ["comment:1285281"],
+            "scope_conditions": ["finance holdings premerge"],
+        }
+
+        def fake_api_request(method, endpoint, params=None, data=None, as_user=False):
+            seen["data"] = data
+            return {"item_key": "FIN-68", "origin_event": "receipt.deploy_verify_waiver"}
+
+        with mock.patch.object(pulse_server, "api_request", side_effect=fake_api_request):
+            pulse_server.issue_deploy_verify_waiver(
+                task_id="FIN-68", reason="mika PASS", evidence=evidence,
+            )
+
+        self.assertEqual(seen["data"]["evidence"], evidence)
+        self.assertEqual(seen["data"]["reason"], "mika PASS")
+
     def test_reason_is_optional_at_adapter_level(self):
         seen = {}
 
