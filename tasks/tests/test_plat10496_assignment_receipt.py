@@ -2,7 +2,7 @@
 from django.db import connection, transaction
 from django.test import TestCase
 
-from tasks.models import Comment, Item, Project
+from tasks.models import Comment, Item, ItemActivity, Project
 from tasks.services.routing_authority import (
     clear_assignment_to_group_queue,
     emit_assignment_clear_thread_receipt,
@@ -22,6 +22,7 @@ class AssignmentClearReceiptTests(TestCase):
         self.item = Item.objects.create(
             mode='task', title='owned', project=self.project,
             workflow_name='simple', assignment_group='engineering',
+            created_by_id=77, created_by_email='creator@example.com',
         )
         # The assignment trigger rejects an owner write without a consumed
         # receipt. Seed the prior owner with triggers off; the clear command
@@ -42,6 +43,14 @@ class AssignmentClearReceiptTests(TestCase):
         self.item.refresh_from_db()
         self.assertIsNone(self.item.assignee_id)
         self.assertEqual(self._cleared().count(), 1)
+        # PLS-1487: the clear save has no request user. The activity row
+        # must name the system actor, not the item creator.
+        activity = ItemActivity.objects.filter(
+            item=self.item, field_name='Assignee',
+        ).order_by('-created_at').first()
+        self.assertIsNotNone(activity)
+        self.assertNotEqual(activity.user_email, 'creator@example.com')
+        self.assertTrue(activity.user_email.startswith('system:'))
         proof = type('Proof', (), {
             'assignee_email': 'ren@shizuha.com',
             'reason': 'explicit_unassign',

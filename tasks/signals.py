@@ -376,9 +376,25 @@ def track_item_changes(sender, instance, created, **kwargs):
     # old `if not user_id` check wrongly treated as "missing" and fell
     # back to created_by, re-crediting changes to the task's creator
     # (e.g. admin@example.com) for every scheduler fire.
-    if user_id is None and not user_email and instance.created_by_id:
+    # PLS-1487: an assignee change with no actor is a system write.
+    # Crediting created_by made Celery sheds look like the reporter
+    # unassigned the item (5.6k/day). Other fields keep the fallback.
+    assignee_changed = False
+    if not created:
+        _prior = _original_values.get(instance.pk) or {}
+        assignee_changed = (
+            _prior.get('assignee_id') != instance.assignee_id
+            or (_prior.get('assignee_email') or '') != (instance.assignee_email or '')
+        )
+    if (
+        user_id is None and not user_email and instance.created_by_id
+        and not assignee_changed
+    ):
         user_id = instance.created_by_id
         user_email = instance.created_by_email or ''
+    elif user_id is None and not user_email and assignee_changed:
+        user_id = 0
+        user_email = 'system:unattributed-assignment'
 
     if user_id is None and not user_email:
         logger.debug(f"Skipping activity tracking for Item {instance.pk}: no actor context")
