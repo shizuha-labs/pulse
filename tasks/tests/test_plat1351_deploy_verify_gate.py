@@ -2055,6 +2055,45 @@ class DeployVerifyGateV4Tests(TestCase):
                     },
                 )
 
+    def test_non_roster_caller_gets_403_from_the_waiver_endpoint(self):
+        # PLAT-12577: the MCP adapter forwards a caller with no delegation
+        # token. Pulse's roster check, not the JWT claims, is the authority.
+        from django.contrib.auth import get_user_model
+        from rest_framework.test import APIClient
+        from tasks.models import ProjectMembership
+
+        User = get_user_model()
+        item = self._item(acceptance_mode='deployed')
+        outsider = User.objects.create_user(
+            username='waiver-outsider', email='outsider@shizuha.com', password='x',
+        )
+        ProjectMembership.objects.create(
+            project=self.project, user_id=outsider.id,
+            user_email=outsider.email, role='member',
+        )
+        client = APIClient()
+        client.force_authenticate(user=outsider)
+        with mock.patch.object(
+            WorkflowService, '_is_team_member', return_value=False,
+        ), mock.patch(
+            'tasks.permissions.ItemProjectPermission.has_object_permission',
+            return_value=True,
+        ), mock.patch(
+            'tasks.permissions.ItemProjectPermission.has_permission',
+            return_value=True,
+        ):
+            denied = client.post(
+                f'/api/items/{item.pk}/issue-deploy-verify-waiver/',
+                {'reason': 'not on the roster', 'evidence': {
+                    'kind': 'inline_package', 'actor': 'test',
+                    'originating_key': 'test', 'reason': 'not on the roster',
+                    'target_head': 'test', 'verdict_refs': ['test'],
+                    'scope_conditions': ['test'],
+                }},
+                format='json',
+            )
+        self.assertEqual(denied.status_code, 403)
+
     # ── block audit / liveness ───────────────────────────────────────────────
 
     def test_block_records_liveness_and_mechanical_comment(self):

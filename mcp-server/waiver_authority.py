@@ -75,6 +75,22 @@ def _is_automation_identity(payload: dict) -> bool:
     return bool(kinds & {"automation", "service", "system"})
 
 
+class AutomationWaiverRefusal(Exception):
+    """The caller is an automation identity and must not reach Pulse."""
+
+
+def waiver_call_uses_user_delegation(token: str, *, has_user_delegation: bool) -> bool:
+    """Whether the MCP call should set ``as_user``.
+
+    A present user-delegation token acts as that user. With none, the agent's
+    own token is sent and Pulse's roster check is the authority. Automation
+    raises before either call.
+    """
+    if _is_automation_identity(_jwt_claims(token)):
+        raise AutomationWaiverRefusal("automation identities cannot mint a deploy-verify waiver")
+    return bool(has_user_delegation)
+
+
 def caller_may_mint_deploy_waiver(token: str) -> bool:
     """True when the caller's own token already carries waiver authority.
 

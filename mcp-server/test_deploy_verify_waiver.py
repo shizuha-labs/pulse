@@ -6,9 +6,10 @@ tasks/tests/test_plat1351_deploy_verify_gate.py. This test pins the MCP-server
 adapter: correct endpoint, reason payload, and error passthrough — so the
 operator-facing invocation path stays wired.
 
-PLAT-12577: a caller whose own token already carries operator / admin-ops /
-devops / qa authority mints with that token. A caller without that claim still
-requires the user-delegation token, and automation identities stay fail-closed.
+PLAT-12577 follow-up: with no user-delegation token the adapter calls Pulse
+with the agent's own token and the server-side roster check is the authority.
+A present delegation still acts as that user. Automation identities are
+refused before the HTTP call.
 """
 import os
 import unittest
@@ -41,8 +42,8 @@ class DeployVerifyWaiverMcpTests(unittest.TestCase):
 
         self.assertEqual(seen["method"], "POST")
         self.assertEqual(seen["endpoint"], "/items/TRD-34/issue-deploy-verify-waiver/")
-        # No role claim on the caller: the user-delegation token is still required.
-        self.assertTrue(seen["as_user"])
+        # No delegation token: the agent's own token carries the call.
+        self.assertFalse(seen["as_user"])
         self.assertEqual(
             seen["data"],
             {"reason": "no correlated production deployment for QA-only task"},
@@ -79,6 +80,53 @@ class DeployVerifyWaiverMcpTests(unittest.TestCase):
             )
 
         self.assertIn("automation cannot issue a deploy-verify waiver", out)
+
+    def test_no_delegation_uses_the_agent_token(self):
+        seen = {}
+
+        def fake_api_request(method, endpoint, params=None, data=None, as_user=False):
+            seen["as_user"] = as_user
+            return {"item_key": "PLAT-11842", "origin_event": "receipt.deploy_verify_waiver"}
+
+        with mock.patch.object(pulse_server, "_get_effective_agent_token", return_value="agent-token"), \
+                mock.patch.object(pulse_server, "_get_effective_user_token", return_value=""), \
+                mock.patch.object(pulse_server, "api_request", side_effect=fake_api_request):
+            pulse_server.issue_deploy_verify_waiver(task_id="PLAT-11842", reason="operator mint")
+
+        self.assertFalse(seen["as_user"])
+
+    def test_automation_caller_is_refused_before_the_http_call(self):
+        token = waiver_token({"email": "system@pulse"})
+        with mock.patch.object(pulse_server, "_get_effective_agent_token", return_value=token), \
+                mock.patch.object(pulse_server, "api_request") as api:
+            out = pulse_server.issue_deploy_verify_waiver(task_id="PLAT-11842", reason="no")
+        api.assert_not_called()
+        self.assertIn("automation identities cannot mint", out)
+
+    def test_delegation_present_acts_as_the_user(self):
+        seen = {}
+
+        def fake_api_request(method, endpoint, params=None, data=None, as_user=False):
+            seen["as_user"] = as_user
+            return {"item_key": "PLAT-11842", "origin_event": "receipt.deploy_verify_waiver"}
+
+        with mock.patch.object(pulse_server, "_get_effective_agent_token", return_value="agent-token"), \
+                mock.patch.object(pulse_server, "_get_effective_user_token", return_value="user-token"), \
+                mock.patch.object(pulse_server, "api_request", side_effect=fake_api_request):
+            pulse_server.issue_deploy_verify_waiver(task_id="PLAT-11842", reason="delegated")
+
+        self.assertTrue(seen["as_user"])
+
+
+def waiver_token(claims):
+    import base64
+    import json
+
+    def segment(value):
+        raw = json.dumps(value, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    return f"{segment({'alg': 'none', 'typ': 'JWT'})}.{segment(claims)}."
 
 
 if __name__ == "__main__":

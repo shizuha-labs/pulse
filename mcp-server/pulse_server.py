@@ -3013,17 +3013,24 @@ def issue_deploy_verify_waiver(task_id: str, reason: str = "") -> str:
     data = {}
     if reason:
         data["reason"] = reason
-    # A role-qualified caller (operator, admin-ops, devops, qa) mints with its
-    # own token. Everyone else, including automation, still requires the user
-    # delegation and fails closed when that token is absent.
-    from waiver_authority import caller_may_mint_deploy_waiver
+    # No user-delegation token: call with the agent's own token and let
+    # Pulse's PLS-675 roster check decide. Team membership is not in the
+    # Shizuha ID JWT. A present delegation still acts as that user.
+    # Automation is refused here, before the HTTP call.
+    from waiver_authority import AutomationWaiverRefusal, waiver_call_uses_user_delegation
 
     caller_token = _get_effective_agent_token()
+    try:
+        as_user = waiver_call_uses_user_delegation(
+            caller_token, has_user_delegation=bool(_get_effective_user_token()),
+        )
+    except AutomationWaiverRefusal as refusal:
+        return f"Error: {refusal}"
     result = api_request(
         "POST",
         _item_path(task_id, "issue-deploy-verify-waiver"),
         data=data,
-        as_user=not caller_may_mint_deploy_waiver(caller_token),
+        as_user=as_user,
     )
     if "error" in result:
         return _fmt_error(result)
