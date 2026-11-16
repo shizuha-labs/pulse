@@ -20144,6 +20144,16 @@ class WorkflowService:
         from . import capability_evidence as _ce
         norm = (email or '').strip().lower()
         caps = sorted(substrate_caps)
+        # PLAT-5228: Hive rejects a team slug that is not lowercase letters,
+        # digits and hyphens with a 400 before any membership lookup. An empty
+        # assignment group is not a failure — there is no team to ask about.
+        # A slug outside that shape fails closed locally. Neither calls Hive,
+        # and neither normalizes the slug.
+        team_slug = str(getattr(item, 'assignment_group', '') or '')
+        if not team_slug:
+            return _ce.SubstrateVerdict(mode, _ce.OUTCOME_AUTHORITY_UNKNOWN, 'no_assignment_group')
+        if not _ce.HIVE_TEAM_SLUG_RE.fullmatch(team_slug):
+            return _ce.SubstrateVerdict(mode, _ce.OUTCOME_AUTHORITY_UNKNOWN, 'team_slug_invalid')
         try:
             request, org_id, team_slug, req_key = WorkflowService._capability_evidence_request(
                 norm, item, caps)
