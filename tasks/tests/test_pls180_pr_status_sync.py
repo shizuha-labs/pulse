@@ -628,7 +628,16 @@ class LinkedPrStatusSyncTests(TestCase):
             result = sync_linked_pr_statuses.run(limit=2)
 
         self.assertEqual(result['checked'], 2)
-        self.assertEqual(get.call_count, 2)
+        # The sync fetches the API URL, not the stored PR URL, and it scans
+        # every item that still holds a linked PR. Earlier tests in this class
+        # leave theirs in the database, so a raw call_count includes those
+        # fetches and flips between runs (HIVE-3045). Count this item's two
+        # pulls by their number in the API path.
+        own_calls = [
+            call for call in get.call_args_list
+            if call.args and call.args[0].rstrip('/').endswith(('/pulls/45', '/pulls/47'))
+        ]
+        self.assertEqual(len(own_calls), 2)
         item.refresh_from_db()
         by_number = {pr['number']: pr for pr in item.metadata['pull_requests']}
         self.assertEqual(by_number[45]['status'], 'closed')
