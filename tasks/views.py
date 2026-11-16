@@ -14639,7 +14639,20 @@ def _external_mcp_item_payload(item):
     }
 
 
-def _external_mcp_available_transitions(item):
+class _ExternalMcpPrincipal:
+    """Lightweight read-only principal for permission-aware transition
+    advertisement (PLAT-5206 spec): carries the client owner identity so
+    _check_transition_conditions can gate on the CALLER's seat, not the
+    API's system context."""
+
+    def __init__(self, owner_email=None, owner_user_id=None):
+        self.id = owner_user_id
+        self.email = owner_email
+        self.is_superuser = False
+        self.is_staff = False
+
+
+def _external_mcp_available_transitions(item, owner_email=None, owner_user_id=None):
     if not item.workflow_name:
         return []
     wf = Workflow.resolve(item.workflow_name)
@@ -14652,6 +14665,7 @@ def _external_mcp_available_transitions(item):
         Q(from_status=current_status) | Q(is_global=True)
     ).order_by('position', 'name')
     from .services.workflow_service import WorkflowService
+    principal = _ExternalMcpPrincipal(owner_email=owner_email, owner_user_id=owner_user_id)
     return [
         {
             'id': str(t.id),
@@ -14666,7 +14680,8 @@ def _external_mcp_available_transitions(item):
             'knowledge_articles': normalize_knowledge_articles(t.knowledge_articles),
         }
         for t in transitions
-        if t.to_status != current_status or t.post_functions
+        if (t.to_status != current_status or t.post_functions)
+        and not WorkflowService._check_transition_conditions(t, item, principal)
     ]
 
 
@@ -14803,7 +14818,11 @@ class ExternalMcpCallView(APIView):
             item = _external_mcp_get_item(token, arguments.get('task_id') or arguments.get('item_id') or arguments.get('item_key'))
             if not item:
                 raise PermissionDenied('Task not found in this token scope.')
-            return {'current_status': item.status, 'transitions': _external_mcp_available_transitions(item)}
+            return {'current_status': item.status, 'transitions': _external_mcp_available_transitions(
+                item,
+                owner_email=token.client.owner_email,
+                owner_user_id=token.client.owner_user_id,
+            )}
         if tool == 'pulse_list_comments':
             item = _external_mcp_get_item(token, arguments.get('task_id') or arguments.get('item_id') or arguments.get('item_key'))
             if not item:
