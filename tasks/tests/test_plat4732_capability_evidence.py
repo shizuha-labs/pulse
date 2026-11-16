@@ -796,3 +796,26 @@ class SubstrateReceiptRevalidationTests(SimpleTestCase):
         self.assertIsNone(ce.revalidate_substrate_receipt(
             r, recomputed_requirement_key=self.RK, current_assignment_generation=7,
             pinned_generation=self.PGEN, expected_subject='mio@shizuha.com', now=999_000))
+
+
+class TeamSlugLocalGateTests(SimpleTestCase):
+    """PLAT-5228: do not call Hive for a slug it would 400."""
+
+    def _verdict(self, group):
+        from tasks.services.workflow_service import WorkflowService
+        item = type('Item', (), {'assignment_group': group})()
+        with mock.patch.object(WorkflowService, '_capability_evidence_request') as build:
+            verdict = WorkflowService._substrate_evidence_verdict(
+                'mio@shizuha.com', item, ['kubeconfig'], 'shadow')
+        build.assert_not_called()
+        return verdict
+
+    def test_empty_assignment_group_skips_hive(self):
+        verdict = self._verdict('')
+        self.assertEqual(verdict.reason, 'no_assignment_group')
+        self.assertEqual(verdict.outcome, ce.OUTCOME_AUTHORITY_UNKNOWN)
+
+    def test_underscore_slug_fails_closed_locally(self):
+        verdict = self._verdict('admin_ops')
+        self.assertEqual(verdict.reason, 'team_slug_invalid')
+        self.assertEqual(verdict.outcome, ce.OUTCOME_AUTHORITY_UNKNOWN)

@@ -625,6 +625,11 @@ OUTCOME_AUTHORIZED = 'authorized'
 OUTCOME_DENIED = 'denied'
 OUTCOME_AUTHORITY_UNKNOWN = 'authority_unknown'
 
+# Hive parse_request rejects anything else as HIVE_EVIDENCE_TEAM_INVALID
+# before a membership lookup (fleet/capability_evidence.py). Kept identical
+# so Pulse can fail closed locally instead of spending the round trip.
+HIVE_TEAM_SLUG_RE = re.compile(r'^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$')
+
 
 @dataclass(frozen=True)
 class SubstrateVerdict:
