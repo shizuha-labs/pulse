@@ -349,7 +349,10 @@ export const notificationChannelsApi = {
 // Organizations API - managed by shizuha-admin
 // All organization CRUD operations go through /admin/api/organizations/
 export const organizationsApi = {
-  // List organizations user belongs to
+  // HIVE-2912: member-scoped list. Does not require the admin product.
+  listMine: () => api.get('/organizations/'),
+
+  // List organizations user belongs to (Admin product; 403 without `admin`)
   list: (params = {}) => adminApi.get('/organizations/', { params }),
 
   // Get single organization by slug

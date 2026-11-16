@@ -63,16 +63,24 @@ export function OrganizationProvider({ children }) {
       // authenticated user.
       const orgs = []
       try {
-        let page = 1
-        let hasNextPage = true
-        while (hasNextPage) {
-          const response = await organizationsApi.list({ page, page_size: 100 })
-          const responseOrgs = response.data.results || response.data
-          orgs.push(...responseOrgs)
-          hasNextPage = Boolean(response.data.results && response.data.next)
-          page += 1
+        // Membership list first. A fresh Hive org has no Pulse project yet, so
+        // deriving orgs from projects cannot see the CTA target (HIVE-2912).
+        const mine = await organizationsApi.listMine()
+        const mineOrgs = mine.data.results || mine.data || []
+        if (mineOrgs.length > 0) {
+          orgs.push(...mineOrgs)
+        } else {
+          let page = 1
+          let hasNextPage = true
+          while (hasNextPage) {
+            const response = await organizationsApi.list({ page, page_size: 100 })
+            const responseOrgs = response.data.results || response.data
+            orgs.push(...responseOrgs)
+            hasNextPage = Boolean(response.data.results && response.data.next)
+            page += 1
+          }
+          if (orgs.length === 0) throw new Error('empty org list')
         }
-        if (orgs.length === 0) throw new Error('empty org list from admin')
       } catch (orgErr) {
         // Admin org list unavailable (403 service_access_denied for non-admins,
         // or empty). Derive the accessible set from the projects the user can

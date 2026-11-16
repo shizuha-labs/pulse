@@ -9655,6 +9655,43 @@ class ProjectBulkDeleteView(APIView):
 # =============================================================================
 
 
+class MemberOrganizationListView(APIView):
+    """HIVE-2912: member-scoped org list for customer SPAs.
+
+    Admin ``GET /admin/api/organizations/`` 403s when the JWT omits ``admin``.
+    Deriving orgs only from Pulse projects also misses a fresh org that Hive
+    just provisioned and has not yet given a Pulse project. This list is the
+    caller's own JWT memberships, hydrated by slug through the service client.
+    It does not require the admin product.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from .services.admin_service import admin_service
+
+        memberships = getattr(request.user, 'organization_memberships', None) or {}
+        orgs = []
+        for org_id, role in memberships.items():
+            try:
+                oid = int(org_id)
+            except (TypeError, ValueError):
+                continue
+            record = admin_service.get_organization(oid) or {}
+            if not isinstance(record, dict):
+                record = {}
+            slug = record.get('slug') or f'org-{oid}'
+            orgs.append({
+                'id': record.get('id', oid),
+                'name': record.get('name') or slug,
+                'slug': slug,
+                'role': str(role or ''),
+            })
+        orgs.sort(key=lambda row: (row['slug'], row['id']))
+        return Response({'results': orgs})
+
+
+
 # =============================================================================
 # Project ViewSet
 # =============================================================================
