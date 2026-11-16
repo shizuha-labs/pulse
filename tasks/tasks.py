@@ -10896,6 +10896,44 @@ def _create_system_comment_deduped(item, content, window_minutes=30):
         return None
 
 
+def _pls509_return_team(item, preferred=''):
+    """Team queue a PLS-509 cap bounce must return work to.
+
+    A direct assignment can already have cleared ``assignment_group``. Reading
+    the field after ``clear_assignment_to_group_queue`` then prints ``None``
+    and drops the task out of every team queue (PLS-1391). Prefer the live
+    group, then the assignee's unique org roster team, captured before the
+    clear nulls the owner.
+    """
+    from .services.workflow_service import WorkflowService
+
+    team = WorkflowService._canonical_team_name(preferred or item.assignment_group)
+    if team:
+        return team
+    # A cleared assignment_group is not "no owner". The project override,
+    # workflow hint, project key, and tags still name a watched lane
+    # (PLS-1483). The assignee roster is only the last resort.
+    derived = WorkflowService._derive_owner_team(item)
+    if derived:
+        return WorkflowService._canonical_team_name(derived)
+    org_id = None
+    project = None
+    state = getattr(item, '_state', None)
+    if state is not None:
+        project = state.fields_cache.get('project')
+    if project is not None:
+        org_id = getattr(project, 'org_id', None)
+    elif getattr(item, 'project_id', None):
+        from .models import Project
+        org_id = Project.objects.filter(pk=item.project_id).values_list(
+            'org_id', flat=True,
+        ).first()
+    resolved = _unique_org_roster_team(
+        getattr(item, 'assignee_email', None), org_id,
+    )
+    return WorkflowService._canonical_team_name(resolved) if resolved else ''
+
+
 _DOWNSTREAM_PIPELINE_LANES = frozenset({'qa', 'merge'})
 
 
@@ -11278,26 +11316,37 @@ def _reclaim_wip_overload():
                 # Review/QA/merge states represent a lane queue even though
                 # their Status category is in_progress.  Preserve the lane
                 # state and release only the concrete seat.
+                lane_team = ''
+                bounced = False
                 with transaction.atomic():
                     fresh = Item.objects.select_for_update().get(pk=stale.pk)
                     if fresh.status not in active_statuses:
                         continue
-                    lane_team = _authoritative_pipeline_lane(fresh)
+                    bounced = True
+                    lane_team = _pls509_return_team(
+                        fresh, preferred=_authoritative_pipeline_lane(fresh),
+                    )
                     current_team = WorkflowService._canonical_team_name(fresh.assignment_group)
-                    if lane_team == current_team:
-                        clear_assignment_to_group_queue(
-                            fresh, reason='wip_overload_reclaim', save=True,
-                        )
-                    else:
+                    # Cap bounce is automation. Do not credit the unassign to
+                    # the seat being cleared (PLS-1391).
+                    fresh._activity_actor = (0, 'system@pulse')
+                    if lane_team and lane_team != current_team:
                         reroute_assignment_to_group_queue(
                             fresh, lane_team,
                             reason='wip_overload_reclaim', save=True,
                         )
+                    else:
+                        clear_assignment_to_group_queue(
+                            fresh, reason='wip_overload_reclaim', save=True,
+                        )
+                if not bounced:
+                    continue
                 queued_active += 1
                 _create_system_comment_deduped(
                     fresh,
-                    f'Returned to the **{lane_team}** team queue: active WIP cap '
-                    f'is {active_cap} (PLS-509).',
+                    'Returned to the **'
+                    f'{lane_team or "unresolved source team"}** team queue: '
+                    f'active WIP cap is {active_cap} (PLS-509).',
                 )
 
         ready = list(
@@ -11340,33 +11389,38 @@ def _reclaim_wip_overload():
                 keep_ordinary_ready = ready_cap - len(protected_ready)
                 ready_overflow = ordinary_ready[keep_ordinary_ready:]
         for excess in ready_overflow:
+            source_team = ''
+            bounced = False
             with transaction.atomic():
                 fresh = Item.objects.select_for_update().get(pk=excess.pk)
                 if fresh.status not in ready_statuses:
                     continue
-                # PLS-1483 test (d): a legitimately shed item must land on a
-                # REAL watched lane — derive the owning team instead of
-                # stamping the unwatched "None" queue (PLS-509 10-27 root).
+                # PLS-1391 / PLS-1483: a shed item must land on a real watched
+                # lane. Prefer the live group, then the derived owner, then the
+                # assignee's unique org roster team. Never stamp "None".
+                bounced = True
+                source_team = _pls509_return_team(fresh)
                 current_team = WorkflowService._canonical_team_name(
                     fresh.assignment_group,
                 )
-                target_team = current_team
-                if not target_team:
-                    derived, _trace = WorkflowService._derive_owner_team_trace(fresh)
-                    target_team = WorkflowService._canonical_team_name(derived or '')
-                if target_team and target_team != current_team:
+                fresh._activity_actor = (0, 'system@pulse')
+                if source_team and source_team != current_team:
                     reroute_assignment_to_group_queue(
-                        fresh, target_team,
+                        fresh, source_team,
                         reason='wip_ready_overflow', save=True,
                     )
                 else:
                     clear_assignment_to_group_queue(
                         fresh, reason='wip_ready_overflow', save=True,
                     )
+            if not bounced:
+                continue
             queued_ready += 1
             _create_system_comment_deduped(
                 fresh,
-                f'Returned to the **{target_team or "unassigned"}** team queue by effective priority/stage/FIFO order: '
+                'Returned to the **'
+                f'{source_team or "unresolved source team"}** team queue by '
+                'effective priority/stage/FIFO order: '
                 f'assigned-ready cap is {ready_cap} (PLS-509).',
             )
     return {
