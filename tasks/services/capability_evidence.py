@@ -316,6 +316,106 @@ def _pinned_producer_generation(environ=None):
     return None
 
 
+# PLAT-13818: Hive publishes the active generation at this path beside the
+# evidence POST. The signature, not the transport, is the trust boundary.
+_ACTIVE_GENERATION_PATH = '/internal/v1/fleet/capability-evidence/active-generation'
+_ACTIVE_GENERATION_FIELDS = (
+    'kid', 'producer_generation_id', 'producer_generation_digest',
+    'activated_at', 'source_sha',
+)
+
+
+def _canonical_generation_bytes(doc):
+    """Stable sorted-key JSON of the signed fields, UTF-8.
+
+    Hive signs the document excluding ``signature`` with this exact
+    serialization (PLAT-13818 contract, comment 1287579). Both sides must
+    match, so the separators carry no whitespace and keys sort.
+    """
+    signed = {field: doc[field] for field in _ACTIVE_GENERATION_FIELDS}
+    return json.dumps(signed, sort_keys=True, separators=(',', ':')).encode('utf-8')
+
+
+def _verify_active_generation(doc, pinned_jwks):
+    """Return the generation tuple, or None when the document does not verify.
+
+    Ladder (PLAT-13818): the kid must be one Pulse already pins, the Ed25519
+    signature must verify over the canonical form, and the document's own kid
+    must be the kid the signature was checked under.
+    """
+    if not isinstance(doc, dict):
+        return None
+    if any(not doc.get(field) for field in _ACTIVE_GENERATION_FIELDS):
+        return None
+    signature = doc.get('signature')
+    if not signature:
+        return None
+    kid = str(doc['kid'])
+    key = pinned_jwks.get(kid)
+    if key is None:
+        return None
+    try:
+        # The pinned value is a PyJWT OKP wrapper, whose verify() checks a
+        # whole JWS rather than raw bytes. Rebuild the Ed25519 key from the
+        # JWK's public coordinate and verify the detached signature directly.
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        jwk = json.loads(_jwt_algorithms.OKPAlgorithm.to_jwk(key))
+        coordinate = base64.urlsafe_b64decode(jwk['x'] + '=' * (-len(jwk['x']) % 4))
+        raw_sig = base64.urlsafe_b64decode(signature + '=' * (-len(signature) % 4))
+        Ed25519PublicKey.from_public_bytes(coordinate).verify(
+            raw_sig, _canonical_generation_bytes(doc))
+    except Exception:
+        logger.warning('Hive active-generation signature did not verify; ignoring')
+        return None
+    return {'producer_generation_id': str(doc['producer_generation_id']),
+            'producer_generation_digest': str(doc['producer_generation_digest']),
+            'kid': kid}
+
+
+def _fetch_active_generation(environ, pinned_jwks, timeout=2):
+    """GET Hive's signed active generation. None on any transport doubt."""
+    endpoint = str(environ.get('PULSE_HIVE_EVIDENCE_URL', '')).strip()
+    if not endpoint:
+        return None
+    base = endpoint.split('/internal/', 1)[0]
+    url = base + _ACTIVE_GENERATION_PATH
+    try:
+        import requests as _requests
+        resp = _requests.get(url, timeout=timeout)
+    except Exception:
+        logger.warning('Hive active-generation endpoint unreachable', exc_info=True)
+        return None
+    if resp.status_code != 200:
+        logger.warning('Hive active-generation endpoint returned HTTP %s', resp.status_code)
+        return None
+    try:
+        return _verify_active_generation(resp.json(), pinned_jwks)
+    except Exception:
+        logger.warning('Hive active-generation body unparseable', exc_info=True)
+        return None
+
+
+def current_producer_generation(environ=None, timeout=2):
+    """The generation evidence must match: Hive's signed one, else the env pin.
+
+    PLAT-13818. Hive's document wins only when its signature verifies against
+    the pinned JWKS. Unreachable, non-200, missing fields, an unknown kid, or
+    a bad signature all fall back to ``PULSE_HIVE_PRODUCER_GENERATION``, which
+    fails closed on its own when absent or malformed. Never returns a
+    generation that was not either signed by Hive or pinned in the env.
+    """
+    env = os.environ if environ is None else environ
+    try:
+        pinned_jwks = _load_pinned_jwks(env)
+        live = _fetch_active_generation(env, pinned_jwks, timeout=timeout)
+    except Exception:
+        logger.warning('Hive active-generation lookup failed; using the env pin', exc_info=True)
+        live = None
+    if live:
+        return live
+    return _pinned_producer_generation(env)
+
+
 # --- The strict verifier -------------------------------------------------------
 # HIVE-1153 P2 #1: the ONLY protected-header keys the frozen contract permits.
 _ALLOWED_HEADER_KEYS = frozenset({'alg', 'typ', 'kid'})
@@ -375,7 +475,9 @@ def verify_evidence_jws(compact_jws, *, request, expected_email, expected_org_id
     if pinned_jwks is None:
         pinned_jwks = _load_pinned_jwks(environ)
     if pinned_generation is None:
-        pinned_generation = _pinned_producer_generation(environ)
+        # PLAT-13818: prefer Hive's signed active generation, and fall back to
+        # the env pin when Hive is unreachable or the signature fails.
+        pinned_generation = current_producer_generation(environ)
 
     if not compact_jws or not isinstance(compact_jws, str):
         raise EvidenceAuthorityUnknown('evidence_missing')
