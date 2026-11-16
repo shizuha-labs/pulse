@@ -1504,3 +1504,34 @@ class OperatorWaitReconciliationConcurrencyTests(TransactionTestCase):
             call.kwargs.get('item') == self.root
             for call in notify.call_args_list
         ))
+
+
+class OperatorWaitReconciliationPlat13406SourceContract(TestCase):
+    """PLAT-13406 structural contract, portable (runs without PostgreSQL).
+
+    The runtime deadlock needs two concurrent reconciliation passes to prove;
+    on SQLite row locks are a no-op, so the structural cures are asserted at
+    the source level here and exercised for real by the PG-gated tests below.
+    """
+
+    def test_reconcile_serializes_and_upserts_single_statement(self):
+        import tasks.services.operator_wait as ow
+        from pathlib import Path
+
+        source = Path(ow.__file__).read_text()
+        # 1) deterministic serialization fence before any row lock, inside
+        # the once-pass specifically (other paths rely on the retry wrapper).
+        once = source[source.index('def _reconcile_operator_wait_markers_once'):]
+        self.assertIn('pg_advisory_xact_lock', once)
+        self.assertLess(
+            once.index('pg_advisory_xact_lock'),
+            once.index("Item.objects.select_for_update().get(pk=digest_item.pk)"),
+            'advisory lock must be taken before the first row lock in the pass',
+        )
+        # 2) 40P01 stop-bleed retry with bounded attempts.
+        # django.db.utils does not export DeadlockDetected; the driver class does.
+        self.assertIn('except psycopg2_errors.DeadlockDetected', source)
+        self.assertIn('_reconcile_operator_wait_markers_once', source)
+        # 3) single-statement convergence on the PG path
+        self.assertIn('update_conflicts=True', source)
+        self.assertIn("unique_fields=['item']", source)

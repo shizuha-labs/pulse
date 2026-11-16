@@ -17,12 +17,16 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import random
 import re
+import time
 
 import requests
 from django.conf import settings
 from django.core.cache import cache
+from django.db import connection
 from django.db import transaction
+from psycopg2 import errors as psycopg2_errors
 from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
@@ -396,15 +400,59 @@ def _withdraw_digest(digest_item: Item, source_comment=None):
     invalidate_markers_for_digest(digest_item.pk, 'digest_withdrawn')
 
 
-@transaction.atomic
 def reconcile_operator_wait_markers(comment: Comment | None = None):
-    """Converge markers from the newest durable EVOL-36 acknowledgement."""
+    """Converge markers from the newest durable EVOL-36 acknowledgement.
+
+    PLAT-13406: the request-side signal (``handle_digest_comment_saved``) and
+    the periodic sweep both enter this function; two concurrent passes used to
+    interleave their per-marker row locks in different orders and deadlock on
+    ``tasks_operator_wait_marker`` tuples (mutual ShareLock, pids
+    3127004/3128352 class). Three stacked cures:
+
+    1. ``pg_advisory_xact_lock`` keyed on the digest item pk serializes the
+       whole reconciliation per digest — the deterministic lock order the two
+       passes never had (the digest item is already the shared fence).
+    2. The candidate marker convergence is a single-statement
+       ``INSERT ... ON CONFLICT (item_id) DO UPDATE`` with a revision-guarded
+       ``WHERE``, so the upsert interleave that fed the share-lock window is
+       gone (one statement, one row-lock round).
+    3. A residual 40P01 (deadlock detected) from non-reconcile writers
+       touching the same rows retries with jittered backoff (max 3) instead of
+       bubbling a false sweep failure.
+    """
+    attempts = 3
+    for attempt in range(attempts):
+        try:
+            return _reconcile_operator_wait_markers_once(comment)
+        except psycopg2_errors.DeadlockDetected:
+            if attempt == attempts - 1:
+                raise
+            # Jittered backoff: ~0.05-0.15s, then ~0.15-0.45s.
+            time.sleep((0.05 + 0.10 * attempt) * (1.0 + random.random()))
+    raise AssertionError('unreachable: retry loop must return or raise')
+
+
+def _is_postgres():
+    return connection.vendor == 'postgresql'
+
+
+@transaction.atomic
+def _reconcile_operator_wait_markers_once(comment: Comment | None = None):
     digest_item = (
         comment.item if comment is not None
         else Item.objects.filter(item_key=DIGEST_ITEM_KEY).first()
     )
     if digest_item is None or digest_item.item_key != DIGEST_ITEM_KEY:
         return {'activated': 0, 'invalidated': 0, 'skipped': 'digest_missing'}
+
+    # PLAT-13406: take the advisory serialization lock BEFORE any row lock so
+    # both entry paths (signal + sweep) acquire the digest-scoped fence in the
+    # same order. The key is the digest item pk — stable, positive, and shared
+    # by every caller by construction.
+    if _is_postgres():
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT pg_advisory_xact_lock(%s)', [digest_item.pk])
+            cursor.fetchone()
 
     # The digest item exists before the first cursor/marker row, so it is the
     # stable serialization fence shared by request-side signals and the sweep.
@@ -495,38 +543,82 @@ def reconcile_operator_wait_markers(comment: Comment | None = None):
         invalidated += int(_set_marker_inactive(marker, 'digest_replaced'))
 
     now = timezone.now()
-    for root_id, candidate in candidates.items():
-        marker = OperatorWaitMarker.objects.select_for_update().filter(
-            item_id=root_id,
-        ).first()
-        if marker is not None and marker.source_revision == payload['revision']:
-            # An evidence/blocker mutation tombstones this exact digest proof.
-            if marker.state != 'active':
-                continue
-            continue
-        defaults = {
-            'surfaced_item': candidate['surfaced'],
-            'digest_item': digest_item,
-            'digest_comment': comment,
-            'source_revision': payload['revision'],
-            'source_message_id': payload['message_id'],
-            'lineage_item_ids': candidate['lineage_ids'],
-            'deadline_at': candidate['deadline_at'],
-            'state': 'active',
-            'invalidated_at': None,
-            'invalidated_reason': '',
+    # PLAT-13406: single-statement revision-guarded convergence. The advisory
+    # lock above serializes passes, so read-compute-write is safe; bulk_create
+    # update_conflicts emits ONE INSERT ... ON CONFLICT (item_id) DO UPDATE.
+    if _is_postgres() and candidates:
+        current = {
+            m.item_id: m
+            for m in OperatorWaitMarker.objects.filter(
+                item_id__in=list(candidates))
         }
-        if marker is None:
-            OperatorWaitMarker.objects.create(item_id=root_id, **defaults)
-        else:
-            for field, value in defaults.items():
-                setattr(marker, field, value)
-            marker.generation += 1
-            marker.activated_at = now
-            marker.save(update_fields=[
-                *defaults.keys(), 'generation', 'activated_at', 'updated_at',
-            ])
-        activated += 1
+        rows = []
+        for root_id, candidate in candidates.items():
+            marker = current.get(root_id)
+            if marker is not None and marker.source_revision == payload['revision']:
+                # Revision match stays a no-op (tombstone respect preserved).
+                continue
+            m = marker or OperatorWaitMarker(item_id=root_id)
+            m.surfaced_item = candidate['surfaced']
+            m.digest_item = digest_item
+            m.digest_comment = comment
+            m.source_revision = payload['revision']
+            m.source_message_id = payload['message_id']
+            m.lineage_item_ids = candidate['lineage_ids']
+            m.deadline_at = candidate['deadline_at']
+            m.state = 'active'
+            m.invalidated_at = None
+            m.invalidated_reason = ''
+            m.generation = (marker.generation if marker else 0) + 1
+            m.activated_at = now
+            rows.append(m)
+        if rows:
+            OperatorWaitMarker.objects.bulk_create(
+                rows,
+                update_conflicts=True,
+                unique_fields=['item'],
+                update_fields=[
+                    'surfaced_item', 'digest_item', 'digest_comment',
+                    'source_revision', 'source_message_id',
+                    'lineage_item_ids', 'deadline_at', 'state',
+                    'invalidated_at', 'invalidated_reason', 'generation',
+                    'activated_at', 'updated_at',
+                ],
+            )
+            activated += len(rows)
+    else:
+        for root_id, candidate in candidates.items():
+            marker = OperatorWaitMarker.objects.select_for_update().filter(
+                item_id=root_id,
+            ).first()
+            if marker is not None and marker.source_revision == payload['revision']:
+                # An evidence/blocker mutation tombstones this exact digest proof.
+                if marker.state != 'active':
+                    continue
+                continue
+            defaults = {
+                'surfaced_item': candidate['surfaced'],
+                'digest_item': digest_item,
+                'digest_comment': comment,
+                'source_revision': payload['revision'],
+                'source_message_id': payload['message_id'],
+                'lineage_item_ids': candidate['lineage_ids'],
+                'deadline_at': candidate['deadline_at'],
+                'state': 'active',
+                'invalidated_at': None,
+                'invalidated_reason': '',
+            }
+            if marker is None:
+                OperatorWaitMarker.objects.create(item_id=root_id, **defaults)
+            else:
+                for field, value in defaults.items():
+                    setattr(marker, field, value)
+                marker.generation += 1
+                marker.activated_at = now
+                marker.save(update_fields=[
+                    *defaults.keys(), 'generation', 'activated_at', 'updated_at',
+                ])
+            activated += 1
 
     # Deadline passage is an independent re-arm event even if no row changed.
     for marker in OperatorWaitMarker.objects.select_for_update().filter(
