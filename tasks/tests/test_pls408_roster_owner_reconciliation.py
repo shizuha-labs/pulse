@@ -1468,8 +1468,8 @@ class OperatorWaitReconciliationConcurrencyTests(TransactionTestCase):
             clear=False,
         ):
             threads = [
-                threading.Thread(target=worker, args=('signal',)),
-                threading.Thread(target=worker, args=('sweep',)),
+                threading.Thread(target=worker, args=('signal',), name='pls408-signal'),
+                threading.Thread(target=worker, args=('sweep',), name='pls408-sweep'),
             ]
             for thread in threads:
                 thread.start()
