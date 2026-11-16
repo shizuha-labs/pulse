@@ -13487,6 +13487,32 @@ class TransitionExecuteView(APIView):
             raise NotFound('Item not found')
         if not ItemProjectPermission().has_object_permission(request, self, item):
             raise PermissionDenied('You do not have permission to transition this item.')
+        # PLAT-13562: project visibility is not team authority. A seat on
+        # another team must not move this item. The assignee may, and so may
+        # a roster member of the item's assignment_group. Staff keep the
+        # operator path. Empty assignment_group stays on the project check.
+        team = str(getattr(item, 'assignment_group', '') or '').strip().lower()
+        actor_email = str(getattr(request.user, 'email', '') or '')
+        assignee_email = str(getattr(item, 'assignee_email', '') or '')
+        if (
+            team
+            and not getattr(request.user, 'is_staff', False)
+            and actor_email.lower() != assignee_email.lower()
+        ):
+            from .services.permissions import _team_roster_bindings_for_email
+            org_id = getattr(getattr(item, 'project', None), 'org_id', None)
+            bindings = _team_roster_bindings_for_email(actor_email)
+            on_team = (org_id, team) in bindings or (
+                org_id is None and any(name == team for _, name in bindings)
+            )
+            if not on_team:
+                logger.warning(
+                    'PLAT-13562 cross-team transition refused item=%s team=%s actor=%s',
+                    getattr(item, 'item_key', item.pk), team, actor_email,
+                )
+                raise PermissionDenied(
+                    'You are not on this item\'s team and are not the assignee.'
+                )
 
         serializer = TransitionExecuteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
