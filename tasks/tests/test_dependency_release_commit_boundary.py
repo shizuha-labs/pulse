@@ -356,8 +356,22 @@ class DependencyReleaseCommitTests(TransactionTestCase):
                    for response in (first, second)]
         with self._identity(), patch.object(deferred_workflow, '_graph', side_effect=synchronized_graph):
             for thread in threads: thread.start()
-            for thread in threads: thread.join(45)
-        self.assertFalse(any(thread.is_alive() for thread in threads))
+            # PLAT-12026: bounded per-thread join inside the patch scope.
+            # Exiting the scope first drops the _graph mock while a worker
+            # can still be inside deferred_workflow.execute() — the lingering-
+            # worker signature (run 9468, same class as the pls408 site).
+            timed_out = []
+            for thread in threads:
+                thread.join(45)
+                if thread.is_alive():
+                    timed_out.append(thread.name)
+        # PLAT-12026: bounded per-thread join, then a named failure.
+        # Duplicate-effect assertions below are unchanged.
+        self.assertEqual(
+            timed_out,
+            [],
+            f"worker threads still alive after join(45): {timed_out}",
+        )
         self.assertEqual(errors, [])
         self.assertEqual(sorted(result['state'] for result in results), ['stale', 'succeeded'], results)
         # The loser saw a real graph-generation change, not a deadlock failure.
