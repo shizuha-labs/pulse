@@ -3013,11 +3013,17 @@ def issue_deploy_verify_waiver(task_id: str, reason: str = "") -> str:
     data = {}
     if reason:
         data["reason"] = reason
+    # A role-qualified caller (operator, admin-ops, devops, qa) mints with its
+    # own token. Everyone else, including automation, still requires the user
+    # delegation and fails closed when that token is absent.
+    from waiver_authority import caller_may_mint_deploy_waiver
+
+    caller_token = _get_effective_agent_token()
     result = api_request(
         "POST",
         _item_path(task_id, "issue-deploy-verify-waiver"),
         data=data,
-        as_user=True,
+        as_user=not caller_may_mint_deploy_waiver(caller_token),
     )
     if "error" in result:
         return _fmt_error(result)

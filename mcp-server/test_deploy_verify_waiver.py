@@ -5,6 +5,10 @@ DRF action `issue-deploy-verify-waiver`) is role-gated and tested in
 tasks/tests/test_plat1351_deploy_verify_gate.py. This test pins the MCP-server
 adapter: correct endpoint, reason payload, and error passthrough — so the
 operator-facing invocation path stays wired.
+
+PLAT-12577: a caller whose own token already carries operator / admin-ops /
+devops / qa authority mints with that token. A caller without that claim still
+requires the user-delegation token, and automation identities stay fail-closed.
 """
 import os
 import unittest
@@ -37,7 +41,7 @@ class DeployVerifyWaiverMcpTests(unittest.TestCase):
 
         self.assertEqual(seen["method"], "POST")
         self.assertEqual(seen["endpoint"], "/items/TRD-34/issue-deploy-verify-waiver/")
-        # Operator-bound action: acts as the chatting user (operator), never the agent.
+        # No role claim on the caller: the user-delegation token is still required.
         self.assertTrue(seen["as_user"])
         self.assertEqual(
             seen["data"],
