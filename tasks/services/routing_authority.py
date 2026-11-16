@@ -1676,6 +1676,15 @@ def _apply_assignment_clear_command(
         item.assignee_id = None
         item.assignee_email = None
         if save and changed:
+            # PLS-1487: this save runs from Celery with no request user.
+            # Without an explicit actor, ItemActivity credits created_by.
+            if not getattr(item, '_activity_actor', None):
+                item._activity_actor = (0, 'system:assignment-clear')
+            cause = getattr(item, '_state_mutation_cause', None)
+            if not isinstance(cause, dict) or not cause.get('kind'):
+                item._state_mutation_cause = {
+                    'kind': str(reason or action or 'assignment_clear'),
+                }
             item.save(update_fields=[
                 'project', 'assignment_group', 'workflow_name',
                 'assignee_id', 'assignee_email',
