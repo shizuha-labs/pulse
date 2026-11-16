@@ -56,6 +56,25 @@ class WaiverAuthorityTests(unittest.TestCase):
                     waiver_authority.caller_may_mint_deploy_waiver(_unsigned_jwt(claims))
                 )
 
+    def test_no_delegation_uses_the_agent_token(self):
+        token = _unsigned_jwt({"email": "hritik@shizuha.com"})
+        self.assertFalse(waiver_authority.waiver_call_uses_user_delegation(
+            token, has_user_delegation=False,
+        ))
+
+    def test_automation_is_refused_before_the_call(self):
+        token = _unsigned_jwt({"email": "system@pulse", "roles": ["operator"]})
+        with self.assertRaises(waiver_authority.AutomationWaiverRefusal):
+            waiver_authority.waiver_call_uses_user_delegation(
+                token, has_user_delegation=False,
+            )
+
+    def test_delegation_present_acts_as_the_user(self):
+        token = _unsigned_jwt({"email": "hritik@shizuha.com"})
+        self.assertTrue(waiver_authority.waiver_call_uses_user_delegation(
+            token, has_user_delegation=True,
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()
