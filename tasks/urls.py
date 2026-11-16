@@ -29,7 +29,7 @@ from .views import (
     AgentSelfAvailabilityView,
     TaskEventListView,  # PLS-171
     TaskDraftProposalView, TaskDraftConfirmView, TaskDraftRejectView,  # PLS-306
-    TeamListView, ResolveAssigneeView, RoutingAuthorityCommandCreateView,
+    TeamListView, MemberOrganizationListView, ResolveAssigneeView, RoutingAuthorityCommandCreateView,
     RoutingAuthorityCommandApproveView, CompanyStateSnapshotView, OrgChartSnapshotView,
     TeamRosterMemberView,
     TeamRosterListCreateView, TeamRosterDetailView, InternalTeamRosterView,
@@ -231,6 +231,8 @@ urlpatterns = [
 
     # Teams endpoint (for assignment dropdown)
     path('teams/', TeamListView.as_view(), name='team-list'),
+    # HIVE-2912: customer org scope without the Admin product.
+    path('organizations/', MemberOrganizationListView.as_view(), name='member-organization-list'),
     # Resolve a team/assignment_group -> current concrete agent (read-only; used by
     # the alert notifier to DM the on-call agent without hardcoding a roster).
     path('teams/resolve-assignee/', ResolveAssigneeView.as_view(), name='team-resolve-assignee'),
