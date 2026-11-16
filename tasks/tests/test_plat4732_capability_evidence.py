@@ -276,6 +276,21 @@ class CapabilityEvidenceVerifierTests(SimpleTestCase):
         self._assert_unknown(
             self._mint(self._claims(iat=now + 4, nbf=now, exp=now + 5)), 'iat_in_future')
 
+    def test_one_second_producer_clock_lead_is_accepted(self):
+        # PLAT-5228: Hive mints iat=nbf=int(time.time()) and Pulse compares
+        # against its own int(time.time()). A producer clock one second ahead
+        # is the observed iat_in_future class, not the +4 adversarial.
+        now = int(time.time())
+        verified = ce.verify_evidence_jws(
+            self._mint(self._claims(iat=now + 1, nbf=now + 1, exp=now + 6)),
+            request=self.request, expected_email=self.email,
+            expected_org_id=self.org, expected_team_slug=self.team,
+            requirement_key=self.reqkey, required_capabilities=self.required,
+            pinned_jwks=self.pinned_jwks, pinned_generation=self.pinned_gen,
+            now=now,
+        )
+        self.assertEqual(verified.subject, self.email)
+
     def test_non_positive_lifetime_rejected(self):
         now = int(time.time())
         self._assert_unknown(

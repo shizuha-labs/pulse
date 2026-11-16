@@ -449,7 +449,12 @@ def verify_evidence_jws(compact_jws, *, request, expected_email, expected_org_id
     now_ts = int(time.time()) if now is None else int(now)
     # RFC 8725: an issued-in-the-future token is never fresh — reject even when
     # nbf<=now<exp (the exact-head adversarial: iat=now+4, nbf=now, exp=now+5).
-    if iat > now_ts:
+    # One second of leeway absorbs integer-second truncation between the Hive
+    # producer clock and this verifier. The producer mints iat=nbf=int(time)
+    # and the verifier compares against int(time); a producer clock one second
+    # ahead otherwise rejects every token as iat_in_future. The +4 adversarial
+    # stays rejected.
+    if iat > now_ts + 1:
         raise EvidenceAuthorityUnknown('iat_in_future')
     if exp <= iat:
         raise EvidenceAuthorityUnknown('non_positive_lifetime')
@@ -459,7 +464,9 @@ def verify_evidence_jws(compact_jws, *, request, expected_email, expected_org_id
         raise EvidenceAuthorityUnknown('lifetime_too_long')
     if now_ts >= exp:
         raise EvidenceAuthorityUnknown('expired')
-    if now_ts < nbf:
+    # Same one-second leeway as iat. The producer sets nbf=iat, so a clock
+    # one second ahead would otherwise pass iat and die here as not_yet_valid.
+    if now_ts + 1 < nbf:
         raise EvidenceAuthorityUnknown('not_yet_valid')
 
     # 4) Exact-seat / request / policy / generation bindings.
