@@ -457,6 +457,64 @@ class Pls835FocusAndCommandTests(TestCase):
         self.assertNotIn('C835-TC', by_key)
         del code
 
+    def test_child_released_blocks_is_benign_non_candidate(self):
+        """PLS-1369: child status that releases blocks is benign, not contradiction.
+
+        Parent non-terminal/non-blocked + live blocks link normally fails closed
+        as parent_link_graph_contradiction. When the CHILD is in a
+        block-releasing non-terminal status (resolved_elsewhere / PLS-719), the
+        ask is already answered — emit authority_class=child_released_blocks
+        without invalidating the census, and keep genuine contradictions failing.
+        """
+        project = _mk_project()
+        # Benign: child already released the block.
+        parent_benign = _mk_item(project, 'C835-RP', 'in_progress')
+        child_benign = _mk_item(
+            project, 'C835-RC', 'resolved_elsewhere', tags='PLAT-4215',
+        )
+        ItemLink.objects.create(
+            source_item=child_benign, target_item=parent_benign,
+            link_type='blocks',
+            created_by_id=0, created_by_email='kumo@shizuha.com',
+        )
+        _mk_disposition(project, parent_benign, child_benign, generation=1)
+
+        # Genuine contradiction must still fail closed.
+        parent_bad = _mk_item(project, 'C835-BP', 'in_progress')
+        child_bad = _mk_item(project, 'C835-BC', 'todo', tags='PLAT-4215')
+        ItemLink.objects.create(
+            source_item=child_bad, target_item=parent_bad, link_type='blocks',
+            created_by_id=0, created_by_email='kumo@shizuha.com',
+        )
+        _mk_disposition(project, parent_bad, child_bad, generation=1)
+
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit) as raised:
+            with redirect_stdout(buf):
+                call_command('census_pls835_waiting_external', format='json')
+        self.assertEqual(raised.exception.code, 2)
+        payload = json.loads(buf.getvalue())
+        self.assertFalse(payload['census_valid'])
+        by_key = {r['child_key']: r for r in payload['rows']}
+        self.assertIn('C835-RC', by_key)
+        self.assertEqual(by_key['C835-RC']['authority_class'], 'child_released_blocks')
+        self.assertFalse(by_key['C835-RC']['eligible'])
+        self.assertFalse(by_key['C835-RC']['authority_ambiguous'])
+        amb_by_key = {
+            a.get('child_key'): a.get('authority_class')
+            for a in payload['ambiguity_rows']
+        }
+        self.assertNotEqual(amb_by_key.get('C835-RC'), 'parent_link_graph_contradiction')
+        self.assertNotIn('C835-RC', {
+            a.get('child_key') for a in payload['ambiguity_rows']
+            if a.get('authority_class') == 'child_released_blocks'
+        })
+        self.assertEqual(amb_by_key.get('C835-BC'), 'parent_link_graph_contradiction')
+        self.assertIn('C835-BC', by_key)
+        self.assertEqual(
+            by_key['C835-BC']['authority_class'], 'parent_link_graph_contradiction',
+        )
+
 
 class Pls835B2SimpleTypedAdmissionTests(TestCase):
     """Seam B2: fresh typed admit from simple must park without workflow mutation.
