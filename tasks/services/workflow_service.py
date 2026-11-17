@@ -5412,6 +5412,67 @@ class WorkflowService:
         return event
 
     @staticmethod
+    def _origin_verified_deploy_event(origin):
+        """Newest verified production DeploymentEvent named on ``origin``.
+
+        PLS-1515: a focused-QA leg spawned from a status transition stores the
+        origin binding but no ``focused_qa_deployment_event_id``, so the
+        projection path above cannot see the origin's deploy. The origin's
+        own event is the same producer relationship (``source_task_keys``),
+        org-scoped and success-gated. Returns None when the origin has no
+        verified production event — the caller then keeps the refusal.
+        """
+        key = str(getattr(origin, 'item_key', '') or '').strip()
+        if not key:
+            return None
+        origin_project = getattr(origin, 'project', None)
+        origin_org = getattr(origin_project, 'org_id', None)
+        if not origin_org:
+            return None
+        try:
+            from ..models import DeploymentEvent
+            from django.db.models import Q as _Q
+        except Exception:
+            return None
+        variants = []
+        for variant in (key, key.lower(), key.upper()):
+            if variant and variant not in variants:
+                variants.append(variant)
+        key_q = _Q()
+        for variant in variants:
+            key_q |= _Q(source_task_keys__contains=[variant])
+        try:
+            candidates = list(DeploymentEvent.objects.select_related(
+                'project',
+            ).filter(
+                key_q,
+                environment__iregex=r'^(live|prod|production)$',
+            ).order_by('-updated_at')[:50])
+        except Exception:
+            return None
+        for event in candidates:
+            event_org = getattr(getattr(event, 'project', None), 'org_id', None)
+            if not event_org or event_org != origin_org:
+                continue
+            named = {
+                str(k).strip().lower()
+                for k in (getattr(event, 'source_task_keys', None) or [])
+            }
+            if key.lower() not in named:
+                continue
+            state = (getattr(event, 'state', '') or '').strip().lower()
+            smoke = (getattr(event, 'smoke_result', '') or '').strip().lower()
+            environment = (getattr(event, 'environment', '') or '').strip().lower()
+            if environment not in WorkflowService._DEPLOY_PROD_ENVS:
+                continue
+            if state not in WorkflowService._DEPLOY_VERIFY_SUCCESS_STATES:
+                continue
+            if not WorkflowService._event_success_smoke_ok(state, smoke):
+                continue
+            return event
+        return None
+
+    @staticmethod
     def _is_typed_regression_watchlist(item):
         """True for the typed regression-watchlist producer class (PLS-888).
 
@@ -7076,6 +7137,14 @@ class WorkflowService:
                 ev = WorkflowService._find_correlated_deploy_event(
                     leg_origin, origin_heads, budget_end=budget_end,
                 )
+            # PLS-1515: status-transition legs persist the origin binding but
+            # no focused_qa_deployment_event_id. The origin's own verified
+            # production event is the same proof the projection path accepts
+            # when the event UUID is present. Still org-scoped and still
+            # requiring a success state — a missing or non-success event
+            # leaves ev None and the leg stays refused.
+            if ev is None:
+                ev = WorkflowService._origin_verified_deploy_event(leg_origin)
             if ev is not None:
                 item_project = getattr(item, 'project', None)
                 event_project = getattr(ev, 'project', None)
