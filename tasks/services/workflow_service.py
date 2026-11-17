@@ -10904,6 +10904,30 @@ class WorkflowService:
                                "the N/A, then retry."
                     )
 
+            elif v_type == 'qnt_data_artifact_gate':
+                # PLAT-4182: QNT pre-close artifact-retention gate.  Fail-closed
+                # for QNT-project tasks: a task may close only after it records a
+                # verified data artifact on the canonical PVC (comment headed
+                # `QNT artifact retention: verified` + fenced JSON matching the
+                # Architecture contract) OR an explicit `QNT artifact retention:
+                # N/A — <reason>` disposition.  Project-scoped so non-QNT
+                # autonomous-dev tasks are unaffected.
+                project_keys = validator.get('project_keys') or ['QNT']
+                if WorkflowService._item_project_key(item) in project_keys:
+                    if not WorkflowService._qnt_artifact_retention_satisfied(item):
+                        raise WorkflowValidationError(
+                            msg or (
+                                "QNT artifact-retention gate (PLAT-4182): this task cannot "
+                                "close code-only. Publish the data snapshot to the canonical "
+                                "PVC (/data/market-data/snapshots/<snapshot_id> on "
+                                "quant-trading/qnt-market-data), run `qnt-data verify "
+                                "--snapshot <path>`, and post a comment headed `QNT artifact "
+                                "retention: verified` with the fenced JSON contract, OR record "
+                                "`QNT artifact retention: N/A — <concrete reason>` if no "
+                                "artifact was produced. See the QNT-3 runbook (wiki 8cd7842a)."
+                            )
+                        )
+
 
             elif v_type == 'reviewer_pass_requires_disposition':
                 snapshot = WorkflowService._refresh_reviewer_request_snapshot(item)
@@ -23454,6 +23478,77 @@ class WorkflowService:
         'customer_facing', 'customer-facing-readiness', 'external-customer',
         'public-launch', 'onboard-tenant', 'design-partner',
     })
+
+    # PLAT-4182: QNT pre-close artifact-retention gate markers.
+    _QNT_ARTIFACT_VERIFIED_MARKER = 'QNT artifact retention: verified'
+    _QNT_ARTIFACT_NA_MARKER = 'QNT artifact retention: N/A — '
+    _QNT_REQUIRED_FILE_COUNT = 4
+
+    @staticmethod
+    def _qnt_artifact_retention_satisfied(item) -> bool:
+        """PLAT-4182: fail-closed QNT closure gate.
+
+        A QNT task may close only if it records either a verified data artifact
+        (``QNT artifact retention: verified`` + fenced JSON matching the
+        Architecture contract) or an explicit ``QNT artifact retention: N/A —
+        <reason>`` disposition.
+        """
+        try:
+            comments = item.comments.all()
+        except Exception:
+            comments = getattr(item, 'comments', []) or []
+        for comment in comments:
+            content = str(getattr(comment, 'content', comment) or '')
+            if WorkflowService._QNT_ARTIFACT_NA_MARKER in content:
+                idx = content.find(WorkflowService._QNT_ARTIFACT_NA_MARKER)
+                if content[idx + len(WorkflowService._QNT_ARTIFACT_NA_MARKER):].strip():
+                    return True
+            if WorkflowService._QNT_ARTIFACT_VERIFIED_MARKER in content:
+                if WorkflowService._qnt_verified_json_valid(content):
+                    return True
+        return False
+
+    @staticmethod
+    def _qnt_verified_json_valid(content: str) -> bool:
+        """Validate the fenced JSON after the ``verified`` marker against the
+        Architecture contract (QNT-3 runbook 8cd7842a): snapshot_id,
+        canonical_path, manifest_path, checksums_path, manifest_sha256, the four
+        required files, and qnt_data_verify {ok:true, files_verified>=4,
+        problems:[]}."""
+        import json
+        try:
+            start = content.find('{')
+            end = content.rfind('}')
+            if start < 0 or end <= start:
+                return False
+            payload = json.loads(content[start:end + 1])
+        except Exception:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        if not payload.get('snapshot_id') or not payload.get('canonical_path'):
+            return False
+        if not payload.get('manifest_path') or not payload.get('checksums_path'):
+            return False
+        if not payload.get('manifest_sha256'):
+            return False
+        required_files = payload.get('required_files')
+        if (
+            not isinstance(required_files, list)
+            or len(required_files) < WorkflowService._QNT_REQUIRED_FILE_COUNT
+        ):
+            return False
+        verify = payload.get('qnt_data_verify')
+        if not isinstance(verify, dict):
+            return False
+        if verify.get('ok') is not True:
+            return False
+        if int(verify.get('files_verified') or 0) < WorkflowService._QNT_REQUIRED_FILE_COUNT:
+            return False
+        if verify.get('problems'):
+            return False
+        return True
+
     _EXTERNAL_EXPOSURE_TEXT_MARKERS = (
         'external customer', 'customer-facing', 'customer facing',
         'public launch', 'onboard tenant', 'onboarding a tenant',
