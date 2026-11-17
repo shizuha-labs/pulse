@@ -76,5 +76,30 @@ class CreateTaskTagsTests(unittest.TestCase):
         )
 
 
+class UpdateTaskTagsTests(unittest.TestCase):
+    @patch("pulse_server.api_request")
+    def test_update_normalizes_a_tag_list(self, mock_api):
+        posted = []
+
+        def _api(method, path, **kwargs):
+            if method == "PATCH":
+                posted.append(kwargs["data"])
+                return {"id": 1, "item_key": "BKSD-27"}
+            return {}
+
+        mock_api.side_effect = _api
+        pulse_server.update_task(
+            task_id="BKSD-27",
+            tags=["wiki", " Wiki ", "fy2025-26", ""],
+        )
+        self.assertEqual(posted[0]["tags"], "wiki,fy2025-26")
+
+    @patch("pulse_server.api_request")
+    def test_update_rejects_a_non_string_element(self, mock_api):
+        result = pulse_server.update_task(task_id="BKSD-27", tags=["wiki", 3])
+        self.assertIn("array elements must be strings", result)
+        mock_api.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
