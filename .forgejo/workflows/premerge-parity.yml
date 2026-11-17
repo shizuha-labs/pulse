@@ -17,5 +17,11 @@ jobs:
       - name: Clone the canonical Origin repository
         run: |
           set -euo pipefail
-          git clone "http://forgejo-http.origin.svc.cluster.local/shizuha-labs/pulse.git" pulse
+          git clone "http://x-token-auth:${GIT_PASSWORD}@forgejo-http.origin.svc.cluster.local/shizuha-labs/pulse.git" pulse
           git -C pulse checkout "${{ github.sha }}"
+        env:
+          # PLAT-5228: the anonymous clone fails ("could not read Username") —
+          # the repo requires auth even for in-cluster reads. The in-cluster-parity
+          # environment mounts the same forgejo-token secret the deploy lanes use.
+          - name: GIT_PASSWORD
+            valueFrom: { secretKeyRef: { name: forgejo-token, key: password } }
