@@ -76,7 +76,7 @@ mcp = FastMCP("shizuha-pulse", stateless_http=True)
 # transport-level bearer enforcement. Shared with all other services via base.
 from base import setup_oauth_routes as _setup_oauth_routes
 import typed_change_spec as _tcs
-from tasks.typed_change_integrity import project_typed_envelope
+from tasks.typed_change_integrity import extract_typed_envelope, project_typed_envelope
 _setup_oauth_routes(mcp, "pulse")
 from mcp.server.sse import TransportSecuritySettings
 mcp.settings.transport_security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
@@ -7071,6 +7071,25 @@ def admin_apply_change_request(change_request_id: int) -> str:
                 f"sealed sha256={seal.get('sha256')} != current sha256={current_digest}. "
                 f"The operations stored on #{change_request_id} are NOT the ones that were "
                 f"approved. Re-propose and re-approve.{tamper_note}")
+    # PLS-1452 (acceptance 1): fail closed on stored-vs-displayed divergence —
+    # the description the APPROVER SAW is a projection of the stored envelope and
+    # BOTH are editable post-approval, so the seal matching the stored ops is not
+    # sufficient: what the approver approved must be exactly what executes. This is
+    # how #20716 slipped through (display read `append`, stored spec was stale
+    # `set`). Recompute the digest over the description's own envelope and refuse
+    # BEFORE any mutation when it diverges from the stored spec.
+    display_envelope = extract_typed_envelope(item.get("description"))
+    if (isinstance(display_envelope, dict)
+            and isinstance(display_envelope.get("operations"), list)):
+        display_digest = _tcs.ops_digest(display_envelope["operations"])
+        if display_digest != current_digest:
+            return (f"Error: REFUSED — stored spec diverges from the displayed envelope "
+                    f"(PLS-1452 / §3.7). stored sha256={current_digest} != displayed "
+                    f"sha256={display_digest}. The approval was granted against a different "
+                    f"operation set than the one stored on #{change_request_id} — applying "
+                    f"it would execute unreviewed operations. Regenerate the description's "
+                    f"Change Specification block from the stored envelope, or re-propose; "
+                    f"never resolve by description edit.{tamper_note}")
     _tags = str(item.get("tags") or "")
     _target_wf = next((t.split(":", 1)[1] for t in _tags.split(",") if t.strip().startswith("target:")), None)
     recheck = _tcs.validate_and_classify(env, fetch_workflow=_fetch_workflow_by_slug, target_workflow=_target_wf)
