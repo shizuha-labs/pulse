@@ -858,6 +858,53 @@ class DeployVerifyGateV4Tests(TestCase):
             WorkflowService._validate_deploy_verify_gate(qa, 'done')
         self.assertIn('missing_merged_head_sha', str(ctx.exception))
 
+    def test_focused_qa_without_event_id_inherits_origin_verified_deploy(self):
+        """PLS-1515: a status-transition leg stores the origin but no event id.
+
+        The origin's verified production DeploymentEvent is the proof. The leg
+        has no PR of its own, so demanding a task-local merged head is
+        unsatisfiable.
+        """
+        origin = self._item(acceptance_mode='live', prs='merged')
+        self._deploy_event(origin, state='verified_by_qa', environment='live')
+        qa = self._item(
+            acceptance_mode='live',
+            prs='none',
+            workflow_name='focused-qa',
+            item_type='task.focused_qa',
+            source='focused-qa-automation',
+            metadata={
+                'focused_qa_origin_item_id': str(origin.pk),
+                'focused_qa_origin_item_key': origin.item_key,
+            },
+        )
+        WorkflowService._validate_deploy_verify_gate(qa, 'done')
+
+    def test_focused_qa_without_event_id_refuses_when_origin_has_no_deploy(self):
+        """PLS-1515 negative: no origin event still refuses the leg."""
+        origin = self._item(acceptance_mode='live', prs='merged')
+        qa = self._item(
+            acceptance_mode='live',
+            prs='none',
+            workflow_name='focused-qa',
+            item_type='task.focused_qa',
+            source='focused-qa-automation',
+            metadata={
+                'focused_qa_origin_item_id': str(origin.pk),
+                'focused_qa_origin_item_key': origin.item_key,
+            },
+        )
+        with self.assertRaises(WorkflowValidationError) as ctx:
+            WorkflowService._validate_deploy_verify_gate(qa, 'done')
+        self.assertIn('missing_merged_head_sha', str(ctx.exception))
+
+    def test_dev_task_without_merged_head_still_refused(self):
+        """PLS-1515 negative: the fallback does not open ordinary dev tasks."""
+        item = self._item(acceptance_mode='live', prs='none', labels=['service-affecting'])
+        with self.assertRaises(WorkflowValidationError) as ctx:
+            WorkflowService._validate_deploy_verify_gate(item, 'done')
+        self.assertIn('missing_merged_head_sha', str(ctx.exception))
+
     def test_focused_qa_without_verified_origin_deploy_stays_closed(self):
         """PLS-888 negative control: provenance without success cannot close."""
         origin = self._item(acceptance_mode='live', prs='merged')
