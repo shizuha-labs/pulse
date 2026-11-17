@@ -91,15 +91,25 @@ class WorkflowShellSyntaxTests(TestCase):
         ]
         self.assertIn('case "${SOURCE_SHA}" in', source_authority)
         self.assertIn('"${SOURCE_SHA}" > /tmp/source-authority.json', source_authority)
-        self.assertIn(
-            "curl --fail-with-body --retry 8 --retry-connrefused",
-            source_authority,
-        )
-        self.assertIn("--retry-delay 2 --retry-max-time 30", source_authority)
+        # PLS-1369: the deterministic-404-on-brand-new-SHA class (registry
+        # ingestion lag) is deliberately NOT covered by curl's transient-class
+        # retry flags — they cannot retry a deterministic 404. The manifest
+        # therefore hand-rolls a bounded shell loop: only the not-yet-ingested
+        # / transient classes (000, 404, 5xx) are retried (40x60s), 200 breaks,
+        # and deterministic contract rejections fall through to the immediate
+        # closed fail.
+        self.assertIn('case "${code}" in', source_authority)
+        self.assertIn('200) echo "source-authority contract accepted (tries=${tries})"; break ;;', source_authority)
+        self.assertIn("000|404|5??)", source_authority, "transient classes must be retried")
+        self.assertIn("sleep 60 ;;", source_authority)
+        self.assertIn('-ge 40', source_authority, "retry bound must be present")
+        self.assertIn("40x60s bounded retry (PLS-1369)", source_authority)
+        self.assertIn('echo "source-authority contract rejected: HTTP ${code}" >&2', source_authority)
+        self.assertIn('--connect-timeout 3 --max-time 10', source_authority)
         self.assertNotIn(
             "--retry-all-errors",
             source_authority,
-            "deterministic contract rejections must fail immediately",
+            "curl class-retry is deliberately absent; the shell loop owns retrying",
         )
 
 

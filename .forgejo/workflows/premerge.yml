@@ -102,18 +102,38 @@ jobs:
                           *) echo "invalid exact PR head: \${SOURCE_SHA}" >&2; exit 64 ;;
                         esac
                         printf '{"repo":"${{ github.event.repository.name }}","ref":"%s"}' "\${SOURCE_SHA}" > /tmp/source-authority.json
-                        # The registry rollout can briefly surface a transient
-                        # 5xx/timeout to a just-scheduled consumer. Retry only
-                        # curl's transient classes (plus connection refused);
-                        # deterministic contract rejections must still fail
-                        # immediately and closed.
-                        curl --fail-with-body --retry 8 --retry-connrefused \
-                          --retry-delay 2 --retry-max-time 30 \
-                          --connect-timeout 3 --max-time 10 \
-                          -H 'Content-Type: application/json' \
-                          -H 'X-Shizuha-Event-Source: origin-ci' \
-                          --data-binary @/tmp/source-authority.json \
-                          http://repo-config-probe.origin.svc.cluster.local:8080/contracts/repository
+                        # Registry ingestion lag (observed ~35min; #999 runs
+                        # 10711/10713 exit 22, PLS-1369) surfaces a DETERMINISTIC
+                        # 404 for brand-new SHAs - curl's transient-class retry
+                        # deliberately does not cover it, so fresh-push PR CI
+                        # could never pass until the SHA aged. Retry ONLY the
+                        # not-yet-ingested/transient classes (404, 5xx, conn
+                        # failure), bounded at 40x60s (~40min, >= observed lag).
+                        # Deterministic contract rejections (400/401/403/409/422)
+                        # still fail immediately and closed.
+                        tries=0
+                        while : ; do
+                          code="\$(curl -s -o /tmp/source-authority-body -w '%{http_code}' \
+                            --connect-timeout 3 --max-time 10 \
+                            -H 'Content-Type: application/json' \
+                            -H 'X-Shizuha-Event-Source: origin-ci' \
+                            --data-binary @/tmp/source-authority.json \
+                            http://repo-config-probe.origin.svc.cluster.local:8080/contracts/repository)" || true
+                          case "\${code}" in
+                            200) echo "source-authority contract accepted (tries=\${tries})"; break ;;
+                            000|404|5??)
+                              tries=\$((tries+1))
+                              if [ "\${tries}" -ge 40 ]; then
+                                echo "source-authority: ref still uningested after 40x60s bounded retry (PLS-1369)" >&2
+                                exit 22
+                              fi
+                              sleep 60 ;;
+                            *)
+                              echo "source-authority contract rejected: HTTP \${code}" >&2
+                              cat /tmp/source-authority-body >&2 || true
+                              exit 22 ;;
+                          esac
+                        done
                     env:
                       - name: SOURCE_SHA
                         # pull_request events carry the head on the event; workflow_dispatch

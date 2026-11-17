@@ -460,9 +460,56 @@ class Command(BaseCommand):
         # Terminal parent + live link: relationship exhausted — skip (benign).
         if parent_terminal:
             return None, ambiguity_rows, error_rows
-        # Non-terminal parent not blocked while block-holding link lives:
-        # inconsistent graph — fail-closed (rui P2 / wiki v15+).
+        # Non-terminal parent not blocked while block-holding link lives.
+        # PLS-1369 / wiki v18 §0.4: if the CHILD status releases blocks
+        # (BLOCK_RELEASING_* / PLS-719 resolved_elsewhere), the ask is already
+        # answered on the parent — emit benign NON-candidate class
+        # child_released_blocks (not a contradiction, not eligible). Only the
+        # residual cases (child still holds the block) fail closed as
+        # parent_link_graph_contradiction (rui P2).
         if parent_slug != 'blocked':
+            child_releases = WorkflowService._status_releases_blocks(child.status)
+            if child_releases:
+                row = {
+                    'eligible': False,
+                    'side': 'disposition',
+                    'child_key': child.item_key or f'#{child.pk}',
+                    'child_status': child.status,
+                    'child_pk': child.pk,
+                    'child_mode': child.mode,
+                    'child_assignee_email': child.assignee_email or '',
+                    'child_workflow_name': child.workflow_name or '',
+                    'disposition_id': str(disp.id),
+                    'disposition_generation': disp.generation,
+                    'disposition_created_at': (
+                        disp.created_at.isoformat() if disp.created_at else None
+                    ),
+                    'limb_verdict': 'child_released_blocks',
+                    'ineligible_reasons': [
+                        'child_status_releases_blocks',
+                        f'parent_status={parent.status!r}_with_live_blocks_link',
+                    ],
+                    'in_active_queue': None,
+                    'has_active_upstream': None,
+                    'has_active_blocked_descendant': None,
+                    'is_focus_candidate': False,
+                    'authority_id': None,
+                    'authority_state': None,
+                    'authority_branch': None,
+                    'authority_org_id': None,
+                    'authority_count_active': None,
+                    'authority_matches_disposition': False,
+                    'authority_class': 'child_released_blocks',
+                    'authority_ambiguous': False,
+                    'authority_ambiguity_reason': None,
+                    'blocks_link_id': str(link.id),
+                    'parent_key': parent.item_key or f'#{parent.pk}',
+                    'parent_status': parent.status,
+                    'parent_pk': parent.pk,
+                    'classification': disp.classification,
+                    'outcome': disp.outcome,
+                }
+                return row, ambiguity_rows, error_rows
             ambiguity_rows.append({
                 'child_key': child.item_key or f'#{child.pk}',
                 'disposition_id': str(disp.id),
