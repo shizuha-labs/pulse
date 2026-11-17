@@ -5,19 +5,40 @@
 # the `in-cluster-parity` environment gate, an Origin clone, and no
 # github.com/shizuha-labs source fallback. Fork PRs get no repo secrets by
 # design, so this suite is maintainer-dispatched only.
+#
+# Typed contract markers (orig18-v3 validation):
+#   marker: dispatch-only-trigger   — `on:` carries ONLY `workflow_dispatch:`
+#                                     (fork PRs get no repo secrets by design;
+#                                     no pull_request trigger on this suite)
+#   marker: parity-environment-gate — the job's `environment:` is
+#                                     `in-cluster-parity` (required reviewers
+#                                     gate BEFORE the cluster credential read)
+#   marker: origin-clone            — the clone step clones the canonical
+#                                     Origin repository over the in-cluster
+#                                     Forgejo HTTP transport, credential-wired
+#                                     (PLAT-5228 github.token)
+#   marker: no-source-fallback      — no github.com/shizuha-labs fallback
+#                                     anywhere in this file
 name: premerge-parity
 on:
   workflow_dispatch:
+  # marker: dispatch-only-trigger — dispatch-only; fork PRs never carry repo
+  # secrets, so the parity suite runs only via maintainer workflow_dispatch.
 
 jobs:
   parity:
     runs-on: deploy-lane
+    # marker: parity-environment-gate — required-reviewers environment gate;
+    # this check must pass before the job reads the cluster credential.
     environment: in-cluster-parity
     steps:
       - name: Clone the canonical Origin repository
         run: |
           set -euo pipefail
+          # marker: origin-clone — canonical Origin repo, in-cluster transport,
+          # credential-wired (PLAT-5228).
           git clone "http://x-token-auth:${GIT_PASSWORD}@forgejo-http.origin.svc.cluster.local/shizuha-labs/pulse.git" pulse
+          # marker: no-source-fallback — none present; no github.com source here.
           git -C pulse checkout "${{ github.sha }}"
         env:
           # PLAT-5228: the anonymous clone fails ("could not read Username") —
