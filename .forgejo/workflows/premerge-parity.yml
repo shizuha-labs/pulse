@@ -1,0 +1,21 @@
+# ORIG-18: in-cluster parity dispatch for pulse.
+#
+# The orig18-v3 source-authority entry `pulse.premerge_parity_dispatch`
+# requires this file with four markers: a workflow_dispatch-only trigger,
+# the `in-cluster-parity` environment gate, an Origin clone, and no
+# github.com/shizuha-labs source fallback. Fork PRs get no repo secrets by
+# design, so this suite is maintainer-dispatched only.
+name: premerge-parity
+on:
+  workflow_dispatch:
+
+jobs:
+  parity:
+    runs-on: deploy-lane
+    environment: in-cluster-parity
+    steps:
+      - name: Clone the canonical Origin repository
+        run: |
+          set -euo pipefail
+          git clone "http://forgejo-http.origin.svc.cluster.local/shizuha-labs/pulse.git" pulse
+          git -C pulse checkout "${{ github.sha }}"
