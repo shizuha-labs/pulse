@@ -35,19 +35,12 @@ jobs:
       - name: Clone the canonical Origin repository
         run: |
           set -euo pipefail
+          # PLAT-5228 cure-fix (third pass): github.token interpolated INSIDE the
+          # run script — the fleet-proven pattern (deploy.yml secrets.KUBE_CONFIG_B64).
+          # Step-level env with expressions is silently dropped by this runner
+          # (envs.txt len:0, run 73680; same class as valueFrom, run 73595).
           # marker: origin-clone — canonical Origin repo, in-cluster transport,
-          # credential-wired (PLAT-5228).
-          git clone "http://x-token-auth:${GIT_PASSWORD}@forgejo-http.origin.svc.cluster.local/shizuha-labs/pulse.git" pulse
+          # credential-wired (PLAT-5228 github.token).
+          git clone "http://x-token-auth:${{ github.token }}@forgejo-http.origin.svc.cluster.local/shizuha-labs/pulse.git" pulse
           # marker: no-source-fallback — none present; no github.com source here.
           git -C pulse checkout "${{ github.sha }}"
-        env:
-          # PLAT-5228: the anonymous clone fails ("could not read Username") —
-          # the repo requires auth even for in-cluster reads.
-          # PLAT-5228 cure-fix: the runner-supplied job token (github.token)
-          # is the Actions-native credential — the premerge lane's forgejo-token
-          # secretKeyRef works only inside its k3s Job pod spec (build ns),
-          # never inside Actions step env; valueFrom is silently ignored here,
-          # and `set -u` then failed the clone in one second (run 73595,
-          # "GIT_PASSWORD: unbound variable").
-          - name: GIT_PASSWORD
-            value: ${{ github.token }}
