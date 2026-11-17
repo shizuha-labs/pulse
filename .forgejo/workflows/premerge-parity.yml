@@ -21,7 +21,12 @@ jobs:
           git -C pulse checkout "${{ github.sha }}"
         env:
           # PLAT-5228: the anonymous clone fails ("could not read Username") —
-          # the repo requires auth even for in-cluster reads. The in-cluster-parity
-          # environment mounts the same forgejo-token secret the deploy lanes use.
+          # the repo requires auth even for in-cluster reads.
+          # PLAT-5228 cure-fix: the runner-supplied job token (github.token)
+          # is the Actions-native credential — the premerge lane's forgejo-token
+          # secretKeyRef works only inside its k3s Job pod spec (build ns),
+          # never inside Actions step env; valueFrom is silently ignored here,
+          # and `set -u` then failed the clone in one second (run 73595,
+          # "GIT_PASSWORD: unbound variable").
           - name: GIT_PASSWORD
-            valueFrom: { secretKeyRef: { name: forgejo-token, key: password } }
+            value: ${{ github.token }}
