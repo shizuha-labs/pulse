@@ -744,6 +744,20 @@ _SPECS = (
         ),
     ),
     MechanicalTemplate(
+        Comment.ORIGIN_WORKFLOW_LIFECYCLE, 'alarm.stale_pr_review', 1,
+        {
+            'repo': str, 'number': str, 'head': str, 'priority': str,
+            'age_hours': str, 'target': str,
+        },
+        {},
+        lambda p: (
+            f"Stale-review alarm: `{p['repo']}#{p['number']}` "
+            f"head `{p['head']}` is {p['priority']}, "
+            f"CI green, zero reviews, age {p['age_hours']}h. "
+            f"Paged **{p['target']}** (PLAT-10524)."
+        ),
+    ),
+    MechanicalTemplate(
         Comment.ORIGIN_WORKFLOW_LIFECYCLE, 'warning.retro_acceptance_mode_live', 2,
         {'item_key': str, 'result': str, 'filed_acceptance_mode': str,
          'record_class_tag': str, 'detail': str},
