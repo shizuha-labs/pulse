@@ -5266,6 +5266,13 @@ def setup_notification_schedules():
             task='tasks.tasks.sweep_stale_reviews',
             enabled=True,
         )
+        # PLAT-10524: urgent/high open PRs that are all-green with zero reviews.
+        ensure_periodic_task(
+            name='Sweep Stale PR Review Alarms',
+            crontab=crontab_hourly,
+            task='tasks.tasks.sweep_stale_pr_review_alarms',
+            enabled=True,
+        )
 
         # Hourly: comment on non-blocked tasks stale on offline/unavailable agents
         # so Pulse surfaces agent-native liveness stalls in-product.
@@ -6065,6 +6072,187 @@ def sweep_stale_reviews(self, hours: int | None = None):
     if healed or escalated:
         logger.info(f"sweep_stale_reviews: re-routed {healed}, escalated {escalated} stale in_review items (>{effective_hours}h)")
     return {'healed': healed, 'escalated': escalated, 'hours': effective_hours}
+
+
+@shared_task(bind=True, max_retries=1)
+def sweep_stale_pr_review_alarms(self):
+    """PLAT-10524: page a capable rung for urgent/high heads with no review.
+
+    Source is in_review Pulse items that already carry an open linked PR.
+    Combined CI must be success. APPROVED/CHANGE_REQUESTED at that head
+    suppresses the page. A void review lead is skipped; no capable rung is
+    a mechanism failure, not a silent comment.
+    """
+    from .models import Item
+    from .services.mechanical_comments import (
+        MechanicalCommentError,
+        MechanicalCommentFactory,
+        deterministic_event_id,
+    )
+    from .services.stale_pr_review_alarm import (
+        candidate_from_facts,
+        ci_is_all_green,
+        dispatch_stale_pr_review_alarms,
+    )
+
+    now = timezone.now()
+    items = Item.objects.filter(
+        status='in_review',
+        is_archived=False,
+        priority__in=['urgent', 'high'],
+    )
+    candidates = []
+    owners = {}
+    for item in items:
+        meta = item.metadata or {}
+        prs = meta.get('pull_requests') or []
+        if not isinstance(prs, list):
+            continue
+        rungs = _stale_pr_review_rungs(item)
+        for pr in prs:
+            if not isinstance(pr, dict):
+                continue
+            if str(pr.get('status') or pr.get('state') or '').lower() in {'closed', 'merged'}:
+                continue
+            repo = str(pr.get('repo') or '').strip()
+            number = pr.get('number')
+            head = str(pr.get('head_sha') or pr.get('headRefOid') or '').strip()
+            if not repo or not number or not head:
+                continue
+            if meta.get('stale_pr_review_alarm_head') == head:
+                continue
+            facts = _stale_pr_review_facts(repo, number, head)
+            if facts is None:
+                continue
+            changed = facts.get('head_changed_at') or now
+            candidates.append(candidate_from_facts(
+                priority=item.priority,
+                repo=repo,
+                number=number,
+                head=head,
+                ci_green=ci_is_all_green(facts.get('status')),
+                reviews=facts.get('reviews') or [],
+                head_changed_at=changed,
+                now=now,
+                rungs=rungs,
+            ))
+            owners[(repo, int(number), head)] = item
+    pages = []
+
+    def page(target, candidate, decision):
+        item = owners.get((candidate['repo'], int(candidate['number']), candidate['head']))
+        if item is None:
+            return
+        try:
+            MechanicalCommentFactory.create(
+                item=item,
+                origin_kind='WORKFLOW_LIFECYCLE',
+                origin_event='alarm.stale_pr_review',
+                template_version=1,
+                structured_payload={
+                    'repo': candidate['repo'],
+                    'number': str(candidate['number']),
+                    'head': candidate['head'][:12],
+                    'priority': candidate['priority'],
+                    'age_hours': f"{candidate['age_hours']:.1f}",
+                    'target': target,
+                },
+                origin_event_id=deterministic_event_id(
+                    'alarm.stale_pr_review', item, candidate['repo'],
+                    candidate['number'], candidate['head'],
+                ),
+            )
+        except MechanicalCommentError:
+            logger.info(
+                'PLAT-10524 stale PR review alarm already recorded for %s#%s',
+                candidate['repo'], candidate['number'],
+            )
+            return
+        meta = dict(item.metadata or {})
+        meta['stale_pr_review_alarm_head'] = candidate['head']
+        meta['stale_pr_review_alarm_target'] = target
+        item.metadata = meta
+        item.save(update_fields=['metadata', 'updated_at'])
+        pages.append(target)
+        logger.warning(
+            'PLAT-10524 stale PR review alarm %s#%s -> %s',
+            candidate['repo'], candidate['number'], target,
+        )
+
+    result = dispatch_stale_pr_review_alarms(candidates, page)
+    for failure in result['failures']:
+        logger.error(
+            'PLAT-10524 stale PR review alarm mechanism_failure %s',
+            failure['candidate'].get('repo'),
+        )
+    return {
+        'paged': len(result['paged']),
+        'failures': len(result['failures']),
+        'targets': pages,
+    }
+
+
+def _stale_pr_review_rungs(item):
+    from .services.workflow_service import WorkflowService
+
+    def capable(team):
+        email = WorkflowService._resolve_team_lead_email(team, item=item)
+        if not email or WorkflowService._is_operator_target(None, email):
+            return False
+        return WorkflowService._is_agent_available_for_assignment(email)
+
+    return [
+        {'name': 'review-lead', 'capable': capable('review')},
+        {'name': 'merge-lane', 'capable': capable('merge')},
+        {'name': 'operator-oob', 'capable': True},
+    ]
+
+
+def _stale_pr_review_facts(repo, number, head):
+    """Fetch combined status, reviews, and head time. None if the fetch fails."""
+    import os
+    from datetime import datetime
+
+    token = os.environ.get('FORGEJO_TOKEN', '').strip()
+    if not token:
+        return None
+    base = os.environ.get('ORIGIN_API_URL', 'https://origin.shizuha.com/api/v1').rstrip('/')
+    if not base.endswith('/api/v1'):
+        base = f'{base}/api/v1'
+    try:
+        import requests
+        headers = {'Authorization': f'token {token}'}
+        status = requests.get(
+            f'{base}/repos/{repo}/commits/{head}/status',
+            headers=headers, timeout=15,
+        )
+        reviews = requests.get(
+            f'{base}/repos/{repo}/pulls/{int(number)}/reviews',
+            headers=headers, timeout=15,
+        )
+        commit = requests.get(
+            f'{base}/repos/{repo}/git/commits/{head}',
+            headers=headers, timeout=15,
+        )
+        if status.status_code >= 400 or reviews.status_code >= 400:
+            return None
+        changed = None
+        if commit.status_code < 400:
+            payload = commit.json()
+            raw = (
+                ((payload.get('commit') or {}).get('committer') or {}).get('date')
+                or payload.get('created')
+            )
+            if raw:
+                changed = datetime.fromisoformat(str(raw).replace('Z', '+00:00'))
+        return {
+            'status': status.json(),
+            'reviews': reviews.json() if isinstance(reviews.json(), list) else [],
+            'head_changed_at': changed,
+        }
+    except Exception:
+        logger.warning('PLAT-10524 fact fetch failed for %s#%s', repo, number, exc_info=True)
+        return None
 
 
 @shared_task(bind=True, max_retries=1)
