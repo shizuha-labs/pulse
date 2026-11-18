@@ -26,3 +26,29 @@ export function deriveOrganizationsFromProjects(projects) {
   }
   return [...seen.values()]
 }
+
+/**
+ * PLS-1162: union the JWT's organization_memberships claim into a
+ * project-derived org set. Projects alone cannot surface EMPTY orgs, and the
+ * Hive empty-org guided onboarding hands off exactly such an org by numeric
+ * id (?org=468 with zero projects). Membership-only orgs get the same
+ * `Organization <id>` / `org-<id>` fallback naming the project path uses.
+ *
+ * @param {Array<{id: number|string, name: string, slug: string}>} orgs orgs derived from projects
+ * @param {Record<string, string>|undefined} memberships user.organization_memberships ({orgId: role})
+ * @returns {Array<{id: number|string, name: string, slug: string, membership_role?: string}>}
+ */
+export function unionMembershipOrganizations(orgs, memberships) {
+  const out = [...(orgs || [])]
+  for (const [orgId, role] of Object.entries(memberships || {})) {
+    const id = String(orgId)
+    if (out.some((o) => String(o.id) === id)) continue
+    out.push({
+      id: orgId,
+      name: `Organization ${id}`,
+      slug: `org-${id}`,
+      membership_role: typeof role === 'string' ? role : undefined,
+    })
+  }
+  return out
+}

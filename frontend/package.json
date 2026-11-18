@@ -13,7 +13,7 @@
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:debug": "playwright test --debug",
     "test:e2e:report": "playwright show-report",
-    "test:unit": "node tests/unit/derive-organizations.test.mjs && node tests/unit/authSession.test.mjs && node tests/unit/workflowOperation.test.mjs && node tests/unit/moveTaskOnBoard.test.mjs",
+    "test:unit": "node tests/unit/derive-organizations.test.mjs && node tests/unit/union-membership-organizations.test.mjs && node tests/unit/authSession.test.mjs && node tests/unit/workflowOperation.test.mjs && node tests/unit/moveTaskOnBoard.test.mjs",
     "test:dashboard": "node tests/unit/dashboardMetrics.test.mjs",
     "prebuild": "npm run test:dashboard && npm run test:security",
     "test:security": "node tests/security/axios-http.test.mjs && node tests/security/markdown-linkify.test.mjs && node tests/security/tooling-parsers.test.mjs"

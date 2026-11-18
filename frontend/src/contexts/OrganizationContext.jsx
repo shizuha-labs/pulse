@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
 import { organizationsApi, projectsApi } from '../services/api'
-import { deriveOrganizationsFromProjects } from '../utils/deriveOrganizationsFromProjects'
+import { deriveOrganizationsFromProjects, unionMembershipOrganizations } from '../utils/deriveOrganizationsFromProjects'
 import { restoredOrganization } from '../utils/createTaskRequest'
 import { useAuth } from './AuthContext'
 
@@ -85,8 +85,17 @@ export function OrganizationProvider({ children }) {
         // Admin org list unavailable (403 service_access_denied for non-admins,
         // or empty). Derive the accessible set from the projects the user can
         // actually see — these are the only orgs any reasoned scope can target.
+        // PLS-1162: projects alone cannot surface EMPTY orgs, and the Hive
+        // empty-org guided onboarding hands off exactly such an org by numeric
+        // id (?org=468 with zero projects). Union the JWT's
+        // organization_memberships claim (user.organization_memberships,
+        // {orgId: role}) into the set so every org the user is a member of —
+        // empty or not — is resolvable by id or slug.
         const projects = await projectsApi.listAll()
-        orgs.push(...deriveOrganizationsFromProjects(projects))
+        orgs.push(...unionMembershipOrganizations(
+          deriveOrganizationsFromProjects(projects),
+          user?.organization_memberships,
+        ))
         if (orgs.length === 0) {
           console.warn('PLS-779: no org source available for this user', orgErr)
         }
