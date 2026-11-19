@@ -12113,6 +12113,30 @@ def _assign_critical_unassigned() -> int:
     return assigned
 
 
+def failover_review_submitter_block(item, email, review_pipeline) -> str | None:
+    """EVOL-88: review-lane failover must not seat the item's submitter."""
+    if item is None or not email:
+        return None
+    status = (getattr(item, 'status', None) or '').strip().lower()
+    group = (getattr(item, 'assignment_group', None) or '').strip().lower()
+    review_statuses = {str(s).strip().lower() for s in (review_pipeline or set())}
+    if status not in review_statuses and group not in {'review', 'qa', 'merge'}:
+        return None
+    submitter = (
+        getattr(item, 'reporter_email', None)
+        or getattr(item, 'created_by_email', None)
+        or ''
+    )
+    if not submitter:
+        return None
+    if submitter.strip().lower() == email.strip().lower():
+        return 'reviewer_is_submitter'
+    from .services.workflow_service import WorkflowService
+    if WorkflowService._emails_same_agent_identity(email, submitter):
+        return 'reviewer_is_submitter'
+    return None
+
+
 def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: str | None = None):
     """
     Autonomous task distribution ("program management"): within each pod, keep
@@ -13233,6 +13257,13 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                     for e, uid in members:
                         if not WorkflowService._email_in_current_team_active_tier(pod, e, item=it):
                             continue
+                        _block = failover_review_submitter_block(it, e, review_pipeline)
+                        if _block:
+                            candidate_reasons.append((e, (_block,)))
+                            continue
+                        if not WorkflowService._member_can_execute_from_status(e, it, user_id=uid):
+                            candidate_reasons.append((e, ('role_gate',)))
+                            continue
                         verdict = WorkflowService._seat_routability_verdict(
                             it, pod, e, intent='new_assignment', enforce_cap=_cap_enforced_pod,
                             user_id=uid, active_load=active_load[uid], inflight_load=inflight_load[uid],
@@ -13281,6 +13312,10 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                     for e, uid in members:
                         if not WorkflowService._email_in_current_team_active_tier(pod, e, item=it):
                             continue
+                        _block = failover_review_submitter_block(it, e, review_pipeline)
+                        if _block:
+                            candidate_reasons.append((e, (_block,)))
+                            continue
                         verdict = WorkflowService._seat_routability_verdict(
                             it, pod, e, intent='new_assignment', enforce_cap=_cap_enforced_pod,
                             user_id=uid, active_load=active_load[uid], inflight_load=inflight_load[uid],
@@ -13289,6 +13324,7 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                             candidate_reasons.append((e, verdict.reasons))
                             continue
                         if not WorkflowService._member_can_execute_from_status(e, it, user_id=uid):
+                            candidate_reasons.append((e, ('role_gate',)))
                             continue
                         if not WorkflowService._seat_satisfies_required_capability(e, _required_caps, item=it):
                             _capability_skips.append(e)
@@ -13702,6 +13738,13 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                         for e, uid in members:
                             if uid == duid or WorkflowService._emails_same_agent_identity(e, de):
                                 continue
+                            _block = failover_review_submitter_block(it, e, review_pipeline)
+                            if _block:
+                                candidate_reasons.append((e, (_block,)))
+                                continue
+                            if not WorkflowService._member_can_execute_from_status(e, it, user_id=uid):
+                                candidate_reasons.append((e, ('role_gate',)))
+                                continue
                             verdict = WorkflowService._seat_routability_verdict(
                                 it, pod, e, intent='new_assignment', enforce_cap=False,
                                 user_id=uid, active_load=active_load[uid], inflight_load=inflight_load[uid],
@@ -13730,6 +13773,10 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                         for e, uid in members:
                             if uid == duid or WorkflowService._emails_same_agent_identity(e, de):
                                 continue
+                            _block = failover_review_submitter_block(it, e, review_pipeline)
+                            if _block:
+                                candidate_reasons.append((e, (_block,)))
+                                continue
                             verdict = WorkflowService._seat_routability_verdict(
                                 it, pod, e, intent='new_assignment', enforce_cap=False,
                                 user_id=uid, active_load=active_load[uid], inflight_load=inflight_load[uid],
@@ -13738,6 +13785,7 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                                 candidate_reasons.append((e, verdict.reasons))
                                 continue
                             if not WorkflowService._member_can_execute_from_status(e, it, user_id=uid):
+                                candidate_reasons.append((e, ('role_gate',)))
                                 continue
                             if not WorkflowService._seat_satisfies_required_capability(e, _required_caps, item=it):
                                 _capability_skips.append(e)
@@ -13922,6 +13970,13 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                             candidate_reasons=[(to_email, ('over_capacity',))],
                         )
                         continue
+                    _write_block = failover_review_submitter_block(fresh, to_email, review_pipeline)
+                    if _write_block:
+                        logger.info(
+                            'EVOL-88: refusing failover write for %s onto %s (%s)',
+                            fresh.item_key or fresh.pk, to_email, _write_block,
+                        )
+                        continue
                     original_assignee_id = fresh.assignee_id
                     fresh.assign({'id': to_uid, 'email': to_email}, save=False)
                     fresh._substrate_write_intent = 'system'  # HIVE-1153 P1#1(b): failover sweep
@@ -14079,6 +14134,10 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                             continue
                         if WorkflowService._at_capacity(active_load[uid], inflight_load[uid]):
                             continue
+                        _block = failover_review_submitter_block(it, e, review_pipeline)
+                        if _block:
+                            candidate_reasons.append((e, (_block,)))
+                            continue
                         verdict = WorkflowService._seat_routability_verdict(
                             it, pod, e, intent='new_assignment', enforce_cap=True,
                             user_id=uid, active_load=active_load[uid], inflight_load=inflight_load[uid],
@@ -14087,6 +14146,7 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                             candidate_reasons.append((e, verdict.reasons))
                             continue
                         if not WorkflowService._member_can_execute_from_status(e, it, user_id=uid):
+                            candidate_reasons.append((e, ('role_gate',)))
                             continue
                         if not WorkflowService._seat_satisfies_required_capability(e, _required_caps, item=it):
                             _capability_skips.append(e)
@@ -14177,6 +14237,10 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
             for e, uid in members:
                 if uid == from_uid:
                     continue
+                _block = failover_review_submitter_block(it, e, review_pipeline)
+                if _block:
+                    candidate_reasons.append((e, (_block,)))
+                    continue
                 verdict = WorkflowService._seat_routability_verdict(
                     it, pod, e, intent='new_assignment', enforce_cap=False,
                     user_id=uid, active_load=active_load[uid], inflight_load=inflight_load[uid],
@@ -14185,6 +14249,7 @@ def _sweep_rebalance_pods_impl(max_skew: int | None = None, only_agent_email: st
                     candidate_reasons.append((e, verdict.reasons))
                     continue
                 if not WorkflowService._member_can_execute_from_status(e, it, user_id=uid):
+                    candidate_reasons.append((e, ('role_gate',)))
                     continue
                 if not WorkflowService._seat_satisfies_required_capability(e, _required_caps, item=it):
                     _capability_skips.append(e)
