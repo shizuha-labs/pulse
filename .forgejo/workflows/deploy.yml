@@ -1034,6 +1034,26 @@ jobs:
           }
 
           EXPECTED_IMAGE="localhost:30500/shizuha-pulse:${TAG}"
+          # PLAT-14025 (run 11330, 2026-11-19): the convergence poll burned
+          # 54 silent minutes and false-reded 'did not converge' against a
+          # release the lifecycle had already converged — every read in the
+          # loop is `|| true`, so a blind kubectl/helm face loops invisibly.
+          # Fail loud BEFORE the loop: one probe of each dependency the poll
+          # relies on. A blind poll is a config defect, not 54 minutes of
+          # retry budget.
+          for probe in 1 2 3; do
+            PROBE_LIVE="$(kubectl get deploy -n shizuha shizuha-pulse -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+            PROBE_HELM="$(helm get values shizuha-pulse -n shizuha -o json 2>/dev/null || true)"
+            if [ -n "${PROBE_LIVE}" ] && [ -n "${PROBE_HELM}" ]; then
+              break
+            fi
+            echo "cluster/helm probe ${probe}/3: live='$(printf '%s' "${PROBE_LIVE}" | head -c 80)' helm_json_bytes=$(printf '%s' "${PROBE_HELM}" | wc -c)"
+            sleep 10
+          done
+          if [ -z "${PROBE_LIVE}" ] || [ -z "${PROBE_HELM}" ]; then
+            echo "::error::PLAT-14025: cluster/helm reads are empty before the convergence poll (kubectl or helm blind in this job) — refusing to burn the 45-minute bound on invisible retries; see the probe lines above"
+            exit 1
+          fi
           for attempt in $(seq 1 540); do
             read_deploy_values_to /tmp/pulse-convergence-values.json
             python3 -c 'import base64,json; open("/tmp/convergence-values.yaml","wb").write(base64.b64decode(json.load(open("/tmp/pulse-convergence-values.json"))["content"]))'
@@ -1073,7 +1093,14 @@ jobs:
               <<< "${FRONTEND_POD_STATE}"
             HELM_VALUES="$(helm get values shizuha-pulse -n shizuha -o json 2>/dev/null || true)"
             STORED_BACKEND_TAG="$(printf '%s' "${HELM_VALUES}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("image",{}).get("tag",""))' 2>/dev/null || true)"
-            STORED_FRONTEND_TAG="$(printf '%s' "${HELM_VALUES}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("frontend",{}).get("image",{}).get("tag",""))' 2>/dev/null || true)"
+            STORED_FRONTEND_TAG="$(printf '%s' "${HELM_VALUES}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("frontend",{}).get("image",{}).get("tag",""))' 2>/dev/null || true)
+            # PLAT-14025: bounded per-iteration diagnostics — run 11330 burned
+            # 54 silent minutes then false-reded against an already-converged
+            # release; name the state terms so the log alone discriminates
+            # blind reads from a genuinely unconverged rollout.
+            if [ "${attempt}" = 1 ] || [ $((attempt % 30)) = 0 ]; then
+              echo "poll attempt ${attempt}/540: live='${LIVE}' fe='${LIVE_FRONTEND}' backend=${BACKEND_STATE} frontend=${FRONTEND_STATE} helm_stored_backend='${STORED_BACKEND_TAG}' helm_stored_frontend='${STORED_FRONTEND_TAG}'"
+            fi"
             if [ "${CHART_BACKEND_TAG}" = "${TAG}" ] \
               && [ "${LIVE}" = "${EXPECTED_IMAGE}" ] \
               && [ "${LIVE_FRONTEND}" = "${EXPECTED_FRONTEND_IMAGE}" ] \
