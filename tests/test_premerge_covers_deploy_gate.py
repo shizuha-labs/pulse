@@ -99,6 +99,16 @@ class PremergeCoversDeployGateTests(unittest.TestCase):
             "Add the missing legs to premerge.yml." % uncovered,
         )
 
+    def test_empty_kubeconfig_fails_closed_before_localhost(self):
+        """PLAT-10924: fork-head empty secrets must not look like a cluster outage."""
+        text = PREMERGE.read_text()
+        self.assertIn('if [ ! -s "$HOME/.kube/config" ]', text)
+        self.assertIn("Fork-head PRs must be re-homed", text)
+        self.assertLess(
+            text.index('printf \'%s\' "${{ secrets.KUBE_CONFIG_B64 }}"'),
+            text.index('if [ ! -s "$HOME/.kube/config" ]'),
+        )
+
     def test_deploy_gate_names_the_incident_boundary(self):
         """The static authz-scope invariant + live tenant probe stay wired."""
         text = DEPLOY.read_text()

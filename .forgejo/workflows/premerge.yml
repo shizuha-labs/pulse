@@ -46,6 +46,15 @@ jobs:
           install -m 0755 kubectl /usr/local/bin/kubectl
           mkdir -p "$HOME/.kube"
           printf '%s' "${{ secrets.KUBE_CONFIG_B64 }}" | base64 -d > "$HOME/.kube/config"
+          # PLAT-10924 / PLAT-10929: Forgejo withholds org secrets from fork-head
+          # pull_request events. An empty kubeconfig used to fall through to
+          # localhost:8080 and die as a connection refused. Security rejected
+          # putting any cluster credential in the untrusted job. Re-home the
+          # head onto shizuha-labs/pulse before this gate can run.
+          if [ ! -s "$HOME/.kube/config" ]; then
+            echo "::error::PLAT-10924: KUBE_CONFIG_B64 is empty. Fork-head PRs must be re-homed onto shizuha-labs/pulse (same-repo) before premerge. A scoped SA in this job is rejected (PLAT-10929)."
+            exit 1
+          fi
           chmod 600 "$HOME/.kube/config"
       - name: Run backend test suite before deploy
         run: |
