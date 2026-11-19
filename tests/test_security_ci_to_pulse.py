@@ -5,6 +5,8 @@ import pathlib
 import subprocess
 import sys
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "security-ci-to-pulse.py"
 FIX = ROOT / "tests" / "fixtures" / "security_ci"
@@ -1898,3 +1900,92 @@ def test_unchanged_ledger_hash_patch_failure_fails_loud(monkeypatch):
         raise AssertionError("expected citation refresh to fail loud")
     except RuntimeError as exc:
         assert "citation refresh failed" in str(exc)
+# --- PLAT-5449: CVSS vectors must be scored numerically, never blanket-high ---
+#
+# Regression: parse_cvss_severity classified ANY block whose `type` contained
+# "CVSS" as high, so e.g. a Moderate 6.1 vector (GHSA-337j-9hxr-rhxg) was filed
+# as an error-severity finding. Vectors are now computed to a numeric v2/v3 base
+# score and bucketed with the exact thresholds used for numeric scores.
+# Reference bases verified against FIRST.org's calculator + published GHSA bases.
+
+def test_cvss3_vector_medium_is_not_high():
+    m = load_module()
+    # GHSA-337j-9hxr-rhxg — published base 6.1 (Moderate).
+    vec = "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N"
+    assert m._cvss_base_score(vec) == 6.1
+    assert (
+        m.parse_cvss_severity([{"type": "CVSS", "score": vec}]) == "medium"
+    )
+
+
+def test_cvss3_vector_high_ish_still_medium():
+    m = load_module()
+    # Scope-changed, C:H but AC:H — published base 6.9 (Moderate), NOT high.
+    vec = "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:H/I:L/A:N"
+    assert m._cvss_base_score(vec) == 6.9
+    assert (
+        m.parse_cvss_severity([{"type": "CVSS", "score": vec}]) == "medium"
+    )
+
+
+def test_cvss3_vector_high_and_critical_buckets():
+    m = load_module()
+    # 7.5 → high (unchanged vs. the old blanket, exercised explicitly).
+    assert (
+        m.parse_cvss_severity(
+            [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"}]
+        )
+        == "high"
+    )
+    # 9.8 → critical.
+    assert (
+        m.parse_cvss_severity(
+            [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]
+        )
+        == "critical"
+    )
+
+
+def test_cvss2_vector_scored_numerically():
+    m = load_module()
+    # Classic unauthenticated v2 vector → 5.8 (medium); layout AV:N/AC:L/Au:N/C:C/I:C/A:C → 10.0.
+    assert m._cvss_base_score("AV:N/AC:M/Au:N/C:P/I:P/A:N") == 5.8
+    assert (
+        m.parse_cvss_severity([{"type": "CVSS_V2", "score": "AV:N/AC:M/Au:N/C:P/I:P/A:N"}])
+        == "medium"
+    )
+    assert m._cvss_base_score("AV:N/AC:L/Au:N/C:C/I:C/A:C") == 10.0
+    assert (
+        m.parse_cvss_severity([{"type": "CVSS_V2", "score": "AV:N/AC:L/Au:N/C:C/I:C/A:C"}])
+        == "critical"
+    )
+
+
+def test_numeric_score_path_unchanged():
+    m = load_module()
+    assert m.parse_cvss_severity([{"type": "CVSS_V3", "score": "9.8"}]) == "critical"
+    assert m.parse_cvss_severity([{"type": "CVSS_V3", "score": "7.2"}]) == "high"
+    assert m.parse_cvss_severity([{"type": "CVSS_V3", "score": "5.5"}]) == "medium"
+
+
+def test_malformed_vector_fails_loudly_v4_and_empty_do_not_invent_high():
+    m = load_module()
+    # Malformed v2/v3 vectors are a data defect: they must RAISE (gate fails
+    # loudly) rather than silently inflating HIGH or guessing a severity.
+    for bad in (
+        "garbage",
+        "AV:N/AC:M/Au:N/C:P",  # v2 missing the A:{N,P,C} metric
+        "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U",  # v3 missing impacts + scope
+    ):
+        with pytest.raises(ValueError):
+            m.parse_cvss_severity([{"type": "CVSS", "score": bad}])
+
+    # CVSS v4 (different metric set) and an empty score are NOT malformed in
+    # the v2/v3 sense — they must not fabricate a severity either.
+    assert (
+        m.parse_cvss_severity(
+            [{"type": "CVSS_V4", "score": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H"}]
+        )
+        == "medium"
+    )
+    assert m.parse_cvss_severity([{"type": "CVSS", "score": ""}]) == "medium"

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -114,31 +115,157 @@ def norm_sev(value: Any) -> str:
     return s if s in SEV_RANK else "medium"
 
 
+# CVSS metric weights (FIRST.org).
+# v2: https://www.first.org/cvss/v2/guide
+_CVSS2_AV = {"N": 1.0, "A": 0.646, "L": 0.395}
+_CVSS2_AC = {"H": 0.35, "M": 0.61, "L": 0.71}
+_CVSS2_AU = {"M": 0.45, "S": 0.56, "N": 0.704}
+_CVSS2_CI = {"N": 0.0, "P": 0.275, "C": 0.660}
+# v3.x: https://www.first.org/cvss/specification-document
+_CVSS3_AV = {"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.2}
+_CVSS3_AC = {"L": 0.77, "H": 0.44}
+_CVSS3_PR = {"N": 0.85, "L": 0.62, "H": 0.27}      # scope unchanged
+_CVSS3_PR_S = {"N": 0.85, "L": 0.68, "H": 0.5}     # scope changed
+_CVSS3_UI = {"N": 0.85, "R": 0.62}
+_CVSS3_CI = {"N": 0.0, "L": 0.22, "H": 0.56}
+
+
+def _parse_cvss_metrics(vector: str) -> dict[str, str] | None:
+    """Split a CVSS vector into a {metric: value} map (v2 or v3.x).
+
+    Accepts v2-style (``AV:L/AC:H/Au:N/C:P/I:N/A:N``) and v3-style
+    (``CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H``) vectors. Returns None for
+    anything that is not a well-formed ``METRIC:VALUE`` list — notably CVSS v4,
+    whose metric set differs and is not covered here.
+    """
+    tokens = vector.strip().split("/")
+    # A v3 vector starts with a ``CVSS:<version>`` token; drop it.
+    if tokens and re.fullmatch(r"CVSS:\d(?:\.\d+)?", tokens[0]):
+        tokens = tokens[1:]
+    metrics: dict[str, str] = {}
+    for tok in tokens:
+        mt = re.fullmatch(r"([A-Za-z]+): *([A-Za-z0-9.]+)", tok)
+        if mt is None or mt.group(1) in metrics:
+            return None
+        metrics[mt.group(1)] = mt.group(2)
+        # Cap the metric count so a 150-token junk string cannot pass below.
+        if len(metrics) > 10:
+            return None
+    return metrics or None
+
+
+def _cvss_base_score(vector: str) -> float | None:
+    """Return the numeric CVSS base score for a v2/v3 vector, else None.
+
+    The equations mirror FIRST.org's CVSS v2 and v3.1 calculators. Verified
+    against published bases, e.g. ``CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N``
+    (GHSA-337j-9hxr-rhxg) → 6.1 and ``…/AC:H/…/C:H/I:L/A:N`` → 6.9.
+    """
+    metrics = _parse_cvss_metrics(vector)
+    if metrics is None:
+        return None
+    try:
+        if "Au" in metrics:  # v2 metric set
+            reqs = ("AV", "AC", "Au", "C", "I", "A")
+            if not all(k in metrics for k in reqs):
+                return None
+            impact = 10.41 * (
+                1
+                - (1 - _CVSS2_CI[metrics["C"]])
+                * (1 - _CVSS2_CI[metrics["I"]])
+                * (1 - _CVSS2_CI[metrics["A"]])
+            )
+            exploitable = 20.0 * _CVSS2_AV[metrics["AV"]] * _CVSS2_AC[metrics["AC"]] * _CVSS2_AU[metrics["Au"]]
+            f_impact = 0.0 if impact == 0.0 else 1.176
+            return _round1(((0.6 * impact) + (0.4 * exploitable) - 1.5) * f_impact)
+        reqs = ("AV", "AC", "PR", "UI", "S", "C", "I", "A")
+        if not all(k in metrics for k in reqs):
+            return None
+        av = _CVSS3_AV[metrics["AV"]]
+        ac = _CVSS3_AC[metrics["AC"]]
+        ui = _CVSS3_UI[metrics["UI"]]
+        scope_changed = metrics["S"] == "C"
+        pr = (_CVSS3_PR_S if scope_changed else _CVSS3_PR)[metrics["PR"]]
+        es = 8.22 * av * ac * pr * ui
+        isc_base = 1 - (
+            (1 - _CVSS3_CI[metrics["C"]])
+            * (1 - _CVSS3_CI[metrics["I"]])
+            * (1 - _CVSS3_CI[metrics["A"]])
+        )
+        if scope_changed:
+            isc = 7.52 * (isc_base - 0.029) - 3.25 * ((isc_base - 0.02) ** 15)
+            return _roundup1(min(1.08 * (isc + es), 10.0))
+        isc = 6.42 * isc_base
+        return _roundup1(min(isc + es, 10.0))
+    except KeyError:
+        # Unknown metric value (e.g. a typo) — treat as unparseable.
+        return None
+
+
+def _round1(x: float) -> float:
+    """Round to one decimal place with half-up semantics (CVSS v2)."""
+    return math.floor(x * 10 + 0.5 + 1e-9) / 10.0
+
+
+def _roundup1(x: float) -> float:
+    """Round up to one decimal place (FIRST ``roundup``, CVSS v3)."""
+    return math.ceil(x * 10 - 1e-9) / 10.0
+
+
+def _bucket_score(score: float) -> str:
+    if score >= 9.0:
+        return "critical"
+    if score >= 7.0:
+        return "high"
+    if score >= 4.0:
+        return "medium"
+    return "low"
+
+
 def parse_cvss_severity(severities: Any) -> str:
-    """Map OSV severity blocks to a coarse Pulse severity."""
+    """Map OSV severity blocks to a coarse Pulse severity.
+
+    OSV entries carry either a numeric score (e.g. 9.8) or a CVSS vector string
+    (e.g. ``CVSS:3.1/AV:N/…``). Both are evaluated numerically against the same
+    thresholds — a vector is never promoted to high merely because it carries
+    CVSS type metadata (the old blanket classified a 6.1-medium vector as high).
+
+    Malformed v2/v3 vectors are a data defect: they RAISE so the gate fails
+    loudly instead of guessing, per PLAT-5449 acceptance. CVSS v4 vectors have a
+    different metric set that this normalizer does not cover; they are skipped
+    (never fabricated), as is an empty/missing score.
+    """
     best = "medium"
     for s in severities or []:
         if not isinstance(s, dict):
             continue
-        raw = str(s.get("score") or "")
+        raw = str(s.get("score") or "").strip()
+        vtype = str(s.get("type") or "")
         # OSV v2 may use a numeric score or a CVSS vector. Prefer numeric when present.
         try:
             score = float(raw)
         except ValueError:
             score = None
         if score is not None:
-            if score >= 9.0:
-                cand = "critical"
-            elif score >= 7.0:
-                cand = "high"
-            elif score >= 4.0:
-                cand = "medium"
-            else:
-                cand = "low"
-        elif "CVSS" in str(s.get("type", "")):
-            cand = "high"
-        else:
+            cand = _bucket_score(score)
+        elif not raw:
+            # No usable score data — leave the running best unchanged.
+            continue
+        elif "CVSS" not in vtype:
             cand = "medium"
+        elif raw.lower().startswith("cvss:4.") or "_V4" in vtype.upper():
+            # CVSS v4 metric set (AV/AT/PR/UI/VC/VI/VA/…) differs from v2/v3.
+            # Never fabricate a severity for a partially-understood vector.
+            continue
+        else:
+            score = _cvss_base_score(raw)
+            if score is None:
+                raise ValueError(
+                    "security-ci: unparseable CVSS vector — refusing to guess a "
+                    f"severity (type={vtype!r}, score={raw!r}); fix the scanner "
+                    "input or the vector parser rather than silently inflating HIGH"
+                )
+            cand = _bucket_score(score)
         if SEV_RANK[cand] > SEV_RANK[best]:
             best = cand
     return best
