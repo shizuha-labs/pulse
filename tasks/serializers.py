@@ -1138,6 +1138,11 @@ class ItemListSerializer(OwnerActionPolicyMixin, serializers.ModelSerializer):
     containment_decision = serializers.SerializerMethodField()
     # PLS-792: recurring-cycle freshness on the lightweight list read surface.
     recurring_cycle = serializers.SerializerMethodField()
+    # PLAT-11156 mechanism 3: pin-staleness flag on the list read surface —
+    # True when a substantive (non-system) comment landed after the pinned
+    # current_state. Lets a seat see "the pin may be stale" without opening
+    # the item (the stale-read class that parked held tasks on pins).
+    current_state_stale = serializers.SerializerMethodField()
 
     # Project fields (read-only computed)
     project_key = serializers.CharField(source='project.key', read_only=True)
@@ -1167,6 +1172,8 @@ class ItemListSerializer(OwnerActionPolicyMixin, serializers.ModelSerializer):
             # cheaply detect new reviewer feedback on held tasks without a
             # per-task pulse_list_comments fetch (the SCLI-76 churn pattern).
             'last_comment_at', 'comment_count',
+            # Pin-staleness signal (PLAT-11156 mechanism 3).
+            'current_state_stale',
             # Alert-specific summary fields
             'occurrence_count', 'fingerprint',
         ]
@@ -1277,6 +1284,24 @@ class ItemListSerializer(OwnerActionPolicyMixin, serializers.ModelSerializer):
                 'created_at', flat=True
             ).first()
         return ts.isoformat() if ts else None
+
+    def get_current_state_stale(self, obj):
+        """
+        PLAT-11156 mechanism 3: True when a substantive (non-system) comment
+        landed after the pinned current_state — i.e. the pin predates live
+        work-state. Prefers the `_substantive_after_pin` annotation set by
+        the my_tasks endpoint (single-query, no N+1); falls back to an
+        exists() query. A null pin is never stale (nothing to be stale).
+        """
+        if not obj.current_state_updated_at:
+            return False
+        val = getattr(obj, '_substantive_after_pin', None)
+        if val is None:
+            val = obj.comments.filter(
+                origin_kind__in=Comment.SUBSTANTIVE_ORIGIN_KINDS,
+                created_at__gt=obj.current_state_updated_at,
+            ).count()
+        return bool(val)
 
 
 TaskListSerializer = ItemListSerializer
