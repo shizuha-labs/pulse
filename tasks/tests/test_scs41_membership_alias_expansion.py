@@ -26,9 +26,15 @@ class SCS41MembershipAliasExpansionTests(APITestCase):
             project=self.project, user_id=None, user_email=email, role=role, is_active=True,
         )
 
-    def _get(self, user_id, email):
+    def _get(self, user_id, email, member_orgs=None):
         url = reverse('internal-user-project-memberships', kwargs={'user_id': user_id})
+        # PLAT-12532: the view reads org ids in one strict call before any
+        # per-org check. Stub that, or the test hits live Admin and 503s.
+        orgs = [1] if member_orgs is None else member_orgs
         with patch(
+            'tasks.services.admin_service.admin_service.get_user_organization_ids_strict',
+            return_value=orgs,
+        ), patch(
             'tasks.services.admin_service.admin_service.is_org_member_strict',
             return_value=True,
         ):
@@ -70,19 +76,27 @@ class SCS41MembershipAliasExpansionTests(APITestCase):
         )
         url = reverse('internal-user-project-memberships', kwargs={'user_id': 4242})
         with patch(
+            'tasks.services.admin_service.admin_service.get_user_organization_ids_strict',
+            return_value=[1],
+        ), patch(
             'tasks.services.admin_service.admin_service.is_org_member_strict',
             return_value=True,
-        ):
+        ) as per_org:
             resp = self.client.get(url)
+        per_org.assert_not_called()
         self.assertEqual(resp.status_code, 200)
         self.assertIn(self.project.id, resp.data['project_ids'])
         self.assertEqual(resp.data['project_memberships'][str(self.project.id)], 'owner')
 
     @patch(
+        'tasks.services.admin_service.admin_service.get_user_organization_ids_strict',
+        return_value=[1],
+    )
+    @patch(
         'tasks.services.admin_service.admin_service.is_org_member_strict',
         side_effect=lambda _user_id, org_id, _email=None: org_id == 1,
     )
-    def test_foreign_org_membership_row_is_not_exported(self, _is_org_member):
+    def test_foreign_org_membership_row_is_not_exported(self, _is_org_member, _orgs):
         foreign = Project.objects.create(
             name='Foreign',
             key='FOR',
@@ -115,10 +129,14 @@ class SCS41MembershipAliasExpansionTests(APITestCase):
         self.assertEqual(response.data['project_ids'], [self.project.id])
 
     @patch(
+        'tasks.services.admin_service.admin_service.get_user_organization_ids_strict',
+        return_value=[],
+    )
+    @patch(
         'tasks.services.admin_service.admin_service.is_org_member_strict',
         return_value=False,
     )
-    def test_exact_org_team_agent_membership_is_exported(self, _is_org_member):
+    def test_exact_org_team_agent_membership_is_exported(self, _is_org_member, _orgs):
         self._seed('zen@agents.shizuha.io')
         TeamRoster.objects.update_or_create(
             organization_slug='shizuha',
@@ -138,3 +156,40 @@ class SCS41MembershipAliasExpansionTests(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['project_ids'], [self.project.id])
+
+    @patch(
+        'tasks.services.admin_service.admin_service.get_user_organization_ids_strict',
+        return_value=[],
+    )
+    @patch(
+        'tasks.services.admin_service.admin_service.is_org_member_strict',
+        return_value=False,
+    )
+    def test_email_less_query_does_not_use_team_roster(self, per_org, _orgs):
+        """PLAT-12532: no email means no TeamRoster grant.
+
+        Admin said this user is in no org. A roster row for the same user_id's
+        usual address must not be consulted, because the request did not name
+        an email to match.
+        """
+        ProjectMembership.objects.create(
+            project=self.project,
+            user_id=4242,
+            user_email='',
+            role='member',
+            is_active=True,
+        )
+        TeamRoster.objects.update_or_create(
+            organization_slug='shizuha',
+            team_name='engineering',
+            defaults={
+                'organization_id': self.project.org_id,
+                'tiers': [['zen@shizuha.com']],
+                'is_active': True,
+            },
+        )
+        url = reverse('internal-user-project-memberships', kwargs={'user_id': 4242})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['project_ids'], [])
+        per_org.assert_not_called()
