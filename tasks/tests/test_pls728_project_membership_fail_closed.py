@@ -57,7 +57,7 @@ class PLS728ProjectMembershipFailClosedTests(APITestCase):
         """Admin unreachable → typed 503, no project_memberships/project_ids."""
         self._seed()
         with patch(
-            'tasks.services.permissions.PermissionService.identity_belongs_to_organization_strict',
+            'tasks.services.permissions.PermissionService.organization_ids_for_identity_strict',
             side_effect=ProjectMembershipUnavailable('admin timeout'),
         ):
             resp = self.client.get(self.url, {'email': 'zen@shizuha.com'})
@@ -70,8 +70,8 @@ class PLS728ProjectMembershipFailClosedTests(APITestCase):
     def test_authoritative_empty_is_served_and_counted(self):
         """No memberships → 200 empty, recorded as authoritative_empty."""
         with patch(
-            'tasks.services.permissions.PermissionService.identity_belongs_to_organization_strict',
-            return_value=True,
+            'tasks.services.permissions.PermissionService.organization_ids_for_identity_strict',
+            return_value=set(),
         ):
             resp = self.client.get(self.url, {'email': 'zen@shizuha.com'})
         self.assertEqual(resp.status_code, 200)
@@ -82,8 +82,8 @@ class PLS728ProjectMembershipFailClosedTests(APITestCase):
         """Membership in an org the user belongs to → 200 with the claim shape."""
         self._seed()
         with patch(
-            'tasks.services.permissions.PermissionService.identity_belongs_to_organization_strict',
-            return_value=True,
+            'tasks.services.permissions.PermissionService.organization_ids_for_identity_strict',
+            return_value={self.project.org_id},
         ):
             resp = self.client.get(self.url, {'email': 'zen@shizuha.com'})
         self.assertEqual(resp.status_code, 200)
@@ -92,6 +92,25 @@ class PLS728ProjectMembershipFailClosedTests(APITestCase):
             resp.data['project_memberships'][str(self.project.id)],
             'member',
         )
+
+    def test_many_orgs_use_one_admin_read(self):
+        """PLAT-12532: N project orgs must not become N Admin membership calls."""
+        other = Project.objects.create(
+            name='Platform', key='PLAT', org_id=2, access_level='private', is_active=True,
+        )
+        self._seed()
+        self._seed(project=other)
+        with patch(
+            'tasks.services.admin_service.admin_service.get_user_organization_ids_strict',
+            return_value=[1, 2],
+        ) as batched, patch(
+            'tasks.services.admin_service.admin_service.is_org_member_strict',
+        ) as per_org:
+            resp = self.client.get(self.url, {'email': 'zen@shizuha.com'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(sorted(resp.data['project_ids']), sorted([self.project.id, other.id]))
+        self.assertEqual(batched.call_count, 1)
+        per_org.assert_not_called()
 
     def test_strict_check_propagates_admin_unavailability(self):
         """AdminServiceUnavailable surfaces as ProjectMembershipUnavailable."""

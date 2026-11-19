@@ -245,6 +245,45 @@ class AdminService:
             return result['organizations']
         return []
 
+    def get_user_organization_ids_strict(
+        self,
+        user_id: int,
+        email: str = None
+    ) -> List[int]:
+        """Org ids for one user; raises ``AdminServiceUnavailable`` when unknown.
+
+        PLAT-12532: the project-memberships projection used to call
+        ``is_org_member_strict`` once per distinct org. A many-project user
+        then spent the whole Admin read budget on that fan-out and ID refused
+        to mint. One ``/users/<id>/organizations/`` read answers the same
+        question. Unlike ``get_user_organizations``, a timeout or non-404
+        failure raises instead of looking like "member of nothing".
+        """
+        params = {}
+        if email:
+            params['email'] = email
+        result = self._make_request_strict(
+            'GET',
+            f'/users/{user_id}/organizations/',
+            params=params,
+        )
+        if result is None:
+            return []
+        orgs = result.get('organizations')
+        if not isinstance(orgs, list):
+            raise AdminServiceUnavailable(
+                f"admin organizations payload missing list for user {user_id}"
+            )
+        ids = []
+        for org in orgs:
+            if not isinstance(org, dict) or org.get('id') is None:
+                continue
+            try:
+                ids.append(int(org['id']))
+            except (TypeError, ValueError):
+                continue
+        return ids
+
     def get_user_organization_ids(
         self,
         user_id: int,

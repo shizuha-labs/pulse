@@ -11770,16 +11770,26 @@ class InternalUserProjectMembershipsView(APIView):
         # unreachable shizuha-admin (which the non-strict path reads as "not a
         # member") fails the request closed instead of serving a short projection
         # as if it were authoritative.
+        # PLAT-12532: one strict user→orgs read, not one Admin call per org.
+        # The per-org fan-out put many-project sign-in over Admin's read budget.
         try:
-            allowed_org_ids = {
-                org_id
-                for org_id in {row[1] for row in rows}
-                if PermissionService.identity_belongs_to_organization_strict(
-                    user_id,
-                    org_id,
-                    user_email,
-                )
-            }
+            member_org_ids = PermissionService.organization_ids_for_identity_strict(
+                user_id,
+                user_email,
+            )
+            row_org_ids = {row[1] for row in rows}
+            allowed_org_ids = member_org_ids & row_org_ids
+            # Agent identities can be represented only by an org-owned TeamRoster
+            # row. Check that local projection only for orgs Admin did not already
+            # confirm, and only when an email was supplied.
+            if user_email:
+                for org_id in row_org_ids - member_org_ids:
+                    if PermissionService.identity_belongs_to_organization_strict(
+                        user_id,
+                        org_id,
+                        user_email,
+                    ):
+                        allowed_org_ids.add(org_id)
         except ProjectMembershipUnavailable as exc:
             record_projection_outcome('unavailable')
             logger.error(

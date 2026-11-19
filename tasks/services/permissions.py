@@ -303,6 +303,25 @@ class PermissionService:
         return False
 
     @staticmethod
+    def organization_ids_for_identity_strict(user_id, user_email=None):
+        """Org ids the identity belongs to, in one strict Admin read.
+
+        Raises :class:`ProjectMembershipUnavailable` when shizuha-admin cannot
+        answer. Used by the internal project-memberships projection so a user
+        with memberships in many orgs does not pay one Admin round trip per
+        org (PLAT-12532). An empty list is authoritative, not "unknown".
+        """
+        from .admin_service import admin_service, AdminServiceUnavailable
+
+        is_valid, int_id = _is_valid_int_id(user_id)
+        if not is_valid:
+            return set()
+        try:
+            return set(admin_service.get_user_organization_ids_strict(int_id, user_email))
+        except AdminServiceUnavailable as exc:
+            raise ProjectMembershipUnavailable(str(exc)) from exc
+
+    @staticmethod
     def get_user_organizations(user_id, user_email=None):
         """
         Get all organizations a user belongs to.

@@ -586,15 +586,20 @@ class V1V2ShadowParityMatrixTests(_V2SnapshotTestCase):
     def _v1_claim(self, user_id, email, admin_member_orgs):
         """Run the REAL v1 view with only the Admin seam stubbed.
 
-        The stub replaces ``admin_service.is_org_member_strict`` — the external
-        Admin service call at the v1 production boundary — so the view's REAL
-        org-membership predicate (Admin truth OR active exact-org roster
-        alias) executes end to end.
+        PLAT-12532 moved the production seam to one
+        ``get_user_organization_ids_strict`` read. Stub that, and keep
+        ``is_org_member_strict`` stubbed for the TeamRoster fallback so the
+        view's REAL predicate (Admin truth OR active exact-org roster alias)
+        still executes end to end. An unstubbed batched read hits live Admin
+        and the projection fails closed with 503.
         """
         from unittest.mock import patch as mock_patch
         from tasks.views import InternalUserProjectMembershipsView
         from rest_framework.test import APIRequestFactory
         from tasks.services import admin_service as admin_service_module
+
+        def fake_org_ids(uid, user_email=None):
+            return list(admin_member_orgs)
 
         def fake_is_org_member_strict(uid, org_id, user_email=None):
             # Authoritative answer only: True (member) / False (not a member).
@@ -607,6 +612,9 @@ class V1V2ShadowParityMatrixTests(_V2SnapshotTestCase):
             f'/api/internal/users/{user_id}/project-memberships/',
             {'email': email} if email else {})
         with mock_patch.object(admin_service_module.admin_service,
+                               'get_user_organization_ids_strict',
+                               side_effect=fake_org_ids), \
+             mock_patch.object(admin_service_module.admin_service,
                                'is_org_member_strict',
                                side_effect=fake_is_org_member_strict):
             response = InternalUserProjectMembershipsView.as_view()(
