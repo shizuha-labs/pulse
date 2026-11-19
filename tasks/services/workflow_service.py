@@ -10611,6 +10611,81 @@ class WorkflowService:
         return False
 
     @staticmethod
+    def _submitter_of_record(item):
+        """EVOL-88: actor who entered the current status, else the creator.
+
+        Newest ``status_changed`` INTO the current status (PLAT-345 immutable
+        ItemActivity derivation). Never raises — lookup failure returns
+        ``(None, None)`` so the caller can fail open.
+        """
+        if item is None:
+            return None, None
+        status = (getattr(item, 'status', None) or '').strip()
+        try:
+            act = None
+            if status and hasattr(item, 'activities'):
+                act = (
+                    item.activities
+                    .filter(
+                        action='status_changed',
+                        field_name__iexact='status',
+                        new_value__iexact=status,
+                    )
+                    .order_by('-created_at')
+                    .first()
+                )
+            if act is not None:
+                return act.user_id, (act.user_email or '').strip().lower() or None
+        except Exception:
+            logger.exception(
+                'EVOL-88 submitter-of-record lookup failed for %s; failing open',
+                getattr(item, 'item_key', getattr(item, 'pk', '?')),
+            )
+            return None, None
+        creator_id = getattr(item, 'created_by_id', None)
+        creator_email = (getattr(item, 'created_by_email', None) or '').strip().lower() or None
+        return creator_id, creator_email
+
+    @staticmethod
+    def _eligibility_reasons_for_candidate(item, email, user_id=None):
+        """EVOL-88 routing-instrument constraints (not applied to direct routing).
+
+        Returns ``status_role_ineligible`` when the seat cannot execute a
+        non-terminal next transition, and ``submitter_of_record`` on
+        review-lane items when the seat is the actor who entered the lane.
+        Submitter email lookup failure fails open (logged).
+        """
+        if item is None:
+            return ()
+        reasons = []
+        norm = (email or '').strip().lower()
+        if norm and not WorkflowService._member_can_execute_from_status(
+            norm, item, user_id=user_id,
+        ):
+            reasons.append('status_role_ineligible')
+        status = (getattr(item, 'status', None) or '').replace('-', '_').lower()
+        if status in {'in_review', 'awaiting_merge'} and norm:
+            try:
+                sub_id, sub_email = WorkflowService._submitter_of_record(item)
+            except Exception:
+                logger.exception(
+                    'EVOL-88 submitter lookup failed open for %s',
+                    getattr(item, 'item_key', getattr(item, 'pk', '?')),
+                )
+                sub_id, sub_email = None, None
+            same = False
+            if user_id is not None and sub_id is not None and str(user_id) == str(sub_id):
+                same = True
+            elif sub_email and (
+                WorkflowService._agent_email_aliases(norm)
+                & WorkflowService._agent_email_aliases(sub_email)
+            ):
+                same = True
+            if same:
+                reasons.append('submitter_of_record')
+        return tuple(dict.fromkeys(reasons))
+
+    @staticmethod
     def _handle_permission_denied_assignee(item, user=None):
         """Backstop for role-gated tasks assigned to a user who cannot act.
 
@@ -20762,6 +20837,8 @@ class WorkflowService:
             'lane_degraded_alert_firing': 'detective alert firing for target lane/pool (PLAT-13267 placement gate)',
             'resolver_source_unavailable': 'resolver source unavailable',
             'status_role_ineligible': 'seat cannot execute this workflow status',
+            'submitter_of_record': 'seat submitted this review cycle',
+            'no_eligible_seat': 'no eligible seat for this routing instrument',
             'over_capacity': 'seat over WIP/in-flight cap',
             'review_sod_author_identity': 'seat SCM identity authored the active review PR',
             'review_sod_author_evidence_unavailable': 'current PR author evidence is unavailable for review SoD',
@@ -20782,6 +20859,9 @@ class WorkflowService:
         'team_unstaffed',
         'org_roster_mismatch',
         'seat_not_team_member',
+        # EVOL-88: emitted only when a routing instrument opts into
+        # eligibility_aware. Direct routing never produces this reason.
+        'submitter_of_record',
         'review_sod_author_identity',
         'review_sod_author_evidence_unavailable',
         'merge_sod_author_identity',
@@ -20822,6 +20902,7 @@ class WorkflowService:
         'seat_not_team_member', 'seat_incapable',
         'seat_incapable_substrate',
         'seat_not_live', 'no_candidate_evidence', 'status_role_ineligible', 'over_capacity',
+        'submitter_of_record', 'no_eligible_seat',
         'team_human_only',
         'resolver_source_unavailable',
         'lane_degraded_alert_firing',  # PLAT-13267 placement gate (defer, never terminal)
@@ -24861,6 +24942,7 @@ class WorkflowService:
         organization_id=None,
         reserve_capacity=True,
         allow_wakeable=True,
+        eligibility_aware=False,
     ):
         """ServiceNow-style: resolve a team to a concrete, available agent — the
         least-loaded member, never the author — and return (user_id, email).
@@ -24905,6 +24987,15 @@ class WorkflowService:
         hibernated assignee never sees ``pulse_get_my_alerts``.  Alert
         assignment passes False so the concrete inbox lands on a resident
         running seat.
+
+        eligibility_aware (EVOL-88): routing instruments (auto-failover,
+        stale-offline failover, rebalance drain, capacity-pull) set True so
+        candidate seats are also filtered on (i) ability to execute ≥1
+        non-terminal next transition and (ii) submitter-of-record exclusion
+        on review-lane items. When the pool empties ONLY on these constraints
+        the resolver emits the ``no_eligible_seat`` routability-hold class
+        instead of assigning an ineligible seat. Direct/new-work routing
+        leaves this False (unchanged behavior).
         """
         from ..user_service import user_service
 
@@ -25304,6 +25395,21 @@ class WorkflowService:
                     recent_activity=base.recent_activity,
                     under_capacity=base.under_capacity,
                 )
+            # EVOL-88: eligibility constraints for the routing instruments —
+            # applied regardless of the exact-role-hold lane gate.
+            if eligibility_aware and item is not None:
+                _evol_reasons = WorkflowService._eligibility_reasons_for_candidate(
+                    item, e, user_id=uid,
+                )
+                if _evol_reasons:
+                    base = WorkflowService._RoutabilityVerdict(
+                        ok=False,
+                        reasons=tuple(dict.fromkeys(base.reasons + _evol_reasons)),
+                        hard_off=base.hard_off,
+                        soft_unavailable=base.soft_unavailable,
+                        recent_activity=base.recent_activity,
+                        under_capacity=base.under_capacity,
+                    )
             if _binding_source and item is not None:
                 from .routing_authority import subject_authorized_for_item
                 subject_id = uid or _binding_candidate_ids.get((e or '').strip().lower())
@@ -25540,6 +25646,17 @@ class WorkflowService:
         _capable = lambda e: WorkflowService._seat_satisfies_required_capability(e, _required_caps, item=item)
         _can_execute = lambda e, uid=None: WorkflowService._member_can_execute_from_status(e, item, user_id=uid)
 
+        def _eligibility_refused(verdict):
+            # status_role_ineligible is intentionally NOT a hard refusal for
+            # direct routing (_ASSIGNMENT_DOES_NOT_REFUSE). Routing instruments
+            # opt in and must not land an ineligible seat.
+            if not eligibility_aware:
+                return False
+            return bool(
+                set(verdict.reasons or ())
+                & {'status_role_ineligible', 'submitter_of_record'}
+            )
+
         _candidate_reasons = []
         pool = []
         for e in candidates:
@@ -25554,12 +25671,13 @@ class WorkflowService:
             # using the same _agent_slot_load measurement the reservation uses,
             # so a stale seat at WIP 23 never wins over under-cap members.
             v = _candidate_verdict(e, cap=enforce_cap)
-            if not WorkflowService._seat_assignment_allowed(v):
+            if not WorkflowService._seat_assignment_allowed(v) or _eligibility_refused(v):
                 _candidate_reasons.append((e, v.reasons))
                 continue
             # Availability and team membership decide the pool. A missing
             # capability or a status this seat cannot execute does not leave
             # the task group-queued: the member sees it and reroutes.
+            # (eligibility_aware instruments already refused above.)
             if WorkflowService._routability_enforced() or _avail(e):
                 pool.append(e)
         if not pool and norm in WorkflowService._JUNIOR_ONLY_TEAMS:
@@ -25605,7 +25723,7 @@ class WorkflowService:
                 if e.strip().lower() in hard_excluded:
                     continue
                 v = _candidate_verdict(e, cap=enforce_cap)
-                if not WorkflowService._seat_assignment_allowed(v):
+                if not WorkflowService._seat_assignment_allowed(v) or _eligibility_refused(v):
                     _candidate_reasons.append((e, v.reasons))
                     continue
                 if WorkflowService._routability_enforced() or _avail(e):
@@ -25628,6 +25746,14 @@ class WorkflowService:
                     f"availability/capability/permission filtering"
                 )
             _hold_reasons = sorted({r for _e, rs in _candidate_reasons for r in (rs or [])})
+            # EVOL-88: when the pool emptied ONLY on eligibility constraints,
+            # surface the dedicated reason class so notices read "no eligible
+            # seat" instead of a liveness/capacity failure. Specifics retained.
+            _eligibility_only = bool(_hold_reasons) and set(_hold_reasons) <= {
+                'status_role_ineligible', 'submitter_of_record',
+            }
+            if eligibility_aware and _eligibility_only:
+                _hold_reasons = ['no_eligible_seat'] + _hold_reasons
             # PLS-900 / ADR-0052 conflict authority (Option C): when the task's
             # conflicted_parties hard-exclusion is present and leaves no assignable
             # candidate, surface a distinct conflicted-exclusion HOLD instead of a
@@ -25644,8 +25770,11 @@ class WorkflowService:
                 # meaningless (terminal, or every scored candidate is
                 # status_role_ineligible), skip the hold — it would re-fire
                 # every sweep tick and bury real holds.
-                if WorkflowService._routability_hold_state_non_routable(
-                    item, _candidate_reasons,
+                if (
+                    not (eligibility_aware and _eligibility_only)
+                    and WorkflowService._routability_hold_state_non_routable(
+                        item, _candidate_reasons,
+                    )
                 ):
                     logger.info(
                         "PLS-1280: item %s in non-routable state for team '%s'; "

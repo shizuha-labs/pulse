@@ -84,6 +84,7 @@ class DecisionPinTests(TestCase):
             exclude_email='aoi@shizuha.com',
             enforce_cap=False,
             item=item,
+            eligibility_aware=True,
         )
 
     def test_failover_rewrites_pin_to_replacement_decision_owner(self):
