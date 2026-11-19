@@ -1093,14 +1093,14 @@ jobs:
               <<< "${FRONTEND_POD_STATE}"
             HELM_VALUES="$(helm get values shizuha-pulse -n shizuha -o json 2>/dev/null || true)"
             STORED_BACKEND_TAG="$(printf '%s' "${HELM_VALUES}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("image",{}).get("tag",""))' 2>/dev/null || true)"
-            STORED_FRONTEND_TAG="$(printf '%s' "${HELM_VALUES}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("frontend",{}).get("image",{}).get("tag",""))' 2>/dev/null || true)
+            STORED_FRONTEND_TAG="$(printf '%s' "${HELM_VALUES}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("frontend",{}).get("image",{}).get("tag",""))' 2>/dev/null || true)"
             # PLAT-14025: bounded per-iteration diagnostics — run 11330 burned
             # 54 silent minutes then false-reded against an already-converged
             # release; name the state terms so the log alone discriminates
             # blind reads from a genuinely unconverged rollout.
             if [ "${attempt}" = 1 ] || [ $((attempt % 30)) = 0 ]; then
               echo "poll attempt ${attempt}/540: live='${LIVE}' fe='${LIVE_FRONTEND}' backend=${BACKEND_STATE} frontend=${FRONTEND_STATE} helm_stored_backend='${STORED_BACKEND_TAG}' helm_stored_frontend='${STORED_FRONTEND_TAG}'"
-            fi"
+            fi
             if [ "${CHART_BACKEND_TAG}" = "${TAG}" ] \
               && [ "${LIVE}" = "${EXPECTED_IMAGE}" ] \
               && [ "${LIVE_FRONTEND}" = "${EXPECTED_FRONTEND_IMAGE}" ] \
