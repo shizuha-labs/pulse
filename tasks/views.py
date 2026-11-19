@@ -13561,13 +13561,8 @@ class TransitionExecuteView(APIView):
             and not getattr(request.user, 'is_staff', False)
             and actor_email.lower() != assignee_email.lower()
         ):
-            from .services.permissions import _team_roster_bindings_for_email
-            org_id = getattr(getattr(item, 'project', None), 'org_id', None)
-            bindings = _team_roster_bindings_for_email(actor_email)
-            on_team = (org_id, team) in bindings or (
-                org_id is None and any(name == team for _, name in bindings)
-            )
-            if not on_team:
+            from .services.team_authz import actor_on_item_team
+            if not actor_on_item_team(item, actor_email):
                 logger.warning(
                     'PLAT-13562 cross-team transition refused item=%s team=%s actor=%s',
                     getattr(item, 'item_key', item.pk), team, actor_email,
