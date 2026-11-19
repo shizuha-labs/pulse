@@ -15743,32 +15743,48 @@ class WorkflowService:
         on the ordinary path; early returns (notably recurring Run Now) and
         exceptions must release it immediately rather than waiting for TTL.
         """
+        # PLAT-13562 leg 2: capture the pre-transition status so the detective
+        # control can prove a real mutation happened (not a same-status noop).
+        pre_transition_status = item.status
         try:
-            try:
-                return WorkflowService._execute_transition_with_dependency_lock(
-                    item,
-                    new_status,
-                    user=user,
-                    screen_data=screen_data,
-                    transition_id=transition_id,
-                    focus_queryset=focus_queryset,
-                )
-            except WorkflowValidationError as exc:
-                if str(exc).startswith(
-                    'You do not have permission to execute transition'
-                ):
-                    try:
-                        WorkflowService._handle_permission_denied_assignee(
-                            item, user=user,
-                        )
-                    except Exception:
-                        logger.exception(
-                            'PLS-203 permission-denied assignee backstop failed for %s',
-                            getattr(item, 'item_key', getattr(item, 'pk', '?')),
-                        )
-                raise
+            result = WorkflowService._execute_transition_with_dependency_lock(
+                item,
+                new_status,
+                user=user,
+                screen_data=screen_data,
+                transition_id=transition_id,
+                focus_queryset=focus_queryset,
+            )
+        except WorkflowValidationError as exc:
+            if str(exc).startswith(
+                'You do not have permission to execute transition'
+            ):
+                try:
+                    WorkflowService._handle_permission_denied_assignee(
+                        item, user=user,
+                    )
+                except Exception:
+                    logger.exception(
+                        'PLS-203 permission-denied assignee backstop failed for %s',
+                        getattr(item, 'item_key', getattr(item, 'pk', '?')),
+                    )
+            raise
         finally:
             WorkflowService._release_unconsumed_wip_reservation(item)
+        if pre_transition_status != item.status:
+            # PLAT-13562 leg 2 (detective): a committed status change by an
+            # actor without team authority is anomalous — the HTTP route
+            # refuses those with 403, so this came from a bypass or a
+            # service-level caller. Fail-open; never breaks the transition.
+            try:
+                from .team_authz import maybe_alert_out_of_team_transition
+                maybe_alert_out_of_team_transition(item, user, pre_transition_status)
+            except Exception:
+                logger.exception(
+                    'PLAT-13562 detective hook failed for %s',
+                    getattr(item, 'item_key', getattr(item, 'pk', '?')),
+                )
+        return result
 
     @staticmethod
     def _execute_transition_with_dependency_lock(
