@@ -5588,6 +5588,21 @@ class ItemViewSet(viewsets.ModelViewSet):
             _last_comment_at=Subquery(
                 _comments.order_by('-created_at').values('created_at')[:1]
             ),
+            # PLAT-11156 mechanism 3: pin-staleness signal on the listing
+            # surface. A substantive (non-system) comment newer than the
+            # pinned current_state means the pin predates live work-state —
+            # the exact stale-read class that parked held tasks on pins
+            # instead of comments (SCLI-76). Compared against
+            # current_state_updated_at; a null pin compares against nothing
+            # (SQL NULL match → no rows → count 0 → not stale).
+            _substantive_after_pin=Coalesce(
+                Subquery(
+                    _comments.filter(
+                        created_at__gt=OuterRef('current_state_updated_at'),
+                    ).values('item').annotate(c=Count('id')).values('c')
+                ),
+                0,
+            ),
         )
         serializer = ItemListSerializer(items, many=True)
         return Response({
