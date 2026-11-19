@@ -5902,6 +5902,7 @@ def sweep_stale_offline_assignments(self, hours: int | None = None):
                         item=item,
                         project_key=(item.project.key if item.project_id else None),
                         enforce_cap=False,
+                        eligibility_aware=True,
                     )
                 if email:
                     old = item.assignee_email
@@ -11126,6 +11127,7 @@ def _resolve_decision_pin_failover_target(item, down_email):
         exclude_email=down_email,
         enforce_cap=False,
         item=item,
+        eligibility_aware=True,
     )
 
 
