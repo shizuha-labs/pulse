@@ -57,6 +57,17 @@
       "reason": "Accepted false positive (adjudicated PLAT-3069, 2026-07-04, security-lead; recurs as PLAT-4551). python-multipart is NOT pinned in any manifest - it is a transitive dependency of `mcp` only; mcp-server/requirements.txt and pyproject.toml declare no python-multipart line, and dependency resolution installs a patched release (0.0.32+, above every listed fixed floor 0.0.18-0.0.31). No direct parser import/use in-repo. Re-remediate only if security-ci reports a concrete manifest pin below the fixed floor.",
       "disposition": "accepted-false-positive",
       "expires": "2099-12-31"
+    },
+    {
+      "tool": "deps",
+      "rule": "pkg:shizuha-labs/pulse:PyPI:django",
+      "path_contains": "deps/PyPI/django",
+      "source_id": "security-ci:09de835f1311461a2c9cc81a",
+      "owner": "security@shizuha.com",
+      "reason": "Defer-to-major under PLAT-6898 (cross-repo django 4.2 -> 5.2 LTS family move; no 4.2 backport policy). PYSEC-2026-3717 (2026-08-04) is fixed only in 5.2.17/6.0.8 - no 4.2.x release clears it; the July pair (PYSEC-2026-2448/2449, fixed 4.2.29) is already cleared by the checked-in Django>=4.2.30 floor in pyproject.toml. Re-remediate via the PLAT-6898 5.2 LTS bump; bounded expiry forces review at quarter end. PLAT-8021.",
+      "disposition": "risk-accepted",
+      "expires": "2026-12-31",
+      "approved_by": "security@shizuha.com"
     }
   ]
 }
