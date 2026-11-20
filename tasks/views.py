@@ -18956,6 +18956,10 @@ def pulse_metrics(request):
     # classifiable instead of prose-only.
     from .runtime_estate_metrics import render_agent_runtime_estate_metrics
     body = body.rstrip('\n') + '\n' + render_agent_runtime_estate_metrics()
+    # PLS-1507: shadow verdicts of the legacy assignment sweeps. Always
+    # rendered (zero-filled) so an absent series is not mistaken for no churn.
+    from .services.assignment_shadow import render_assignment_shadow_metrics
+    body = body.rstrip('\n') + '\n' + render_assignment_shadow_metrics()
     # PLS-728: project-membership projection serve outcomes — the family is
     # always rendered (zero-filled) so a detector can alert on absent() as well
     # as on `unavailable` increments.

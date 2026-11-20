@@ -11675,6 +11675,16 @@ def _reclaim_wip_overload():
             if not bounced:
                 continue
             queued_ready += 1
+            # PLS-1507: shadow only. Queue-mode would have kept this ownership
+            # (sweeps never shed a live claim); the legacy shed still happens.
+            # Team is bound before the try: a NameError here must not be
+            # swallowed into a silent zero (review 8638).
+            shadow_team = source_team or ''
+            try:
+                from .services.assignment_shadow import record_shadow_verdict
+                record_shadow_verdict('wip_shed', 'keep_ownership', shadow_team)
+            except Exception:
+                logger.warning('PLS-1507 shadow record failed', exc_info=True)
             _create_system_comment_deduped(
                 fresh,
                 'Returned to the **'
@@ -14875,6 +14885,17 @@ def sweep_assign_group_queued(
                     current.item_key, current.assignment_group, current.status,
                     _urgent, reason,
                 )
+                # PLS-1507: shadow only. A cap refusal is the queue-mode
+                # claim_at_capacity verdict; every other miss is not a
+                # capacity decision and is not counted here.
+                if 'over_capacity' in reason or 'capacity_unavailable' in reason:
+                    try:
+                        from .services.assignment_shadow import record_shadow_verdict
+                        record_shadow_verdict(
+                            'queue_assign', 'claim_at_capacity', current.assignment_group,
+                        )
+                    except Exception:
+                        logger.warning('PLS-1507 shadow record failed', exc_info=True)
                 if not _urgent:
                     _skip_until[_pk_str] = str(_now_ts_for_skip + _SKIP_TTL)
                     _dirty_skip = True
@@ -14921,6 +14942,15 @@ def sweep_assign_group_queued(
                     fields + ['updated_at'],
                 )))
                 assigned += 1
+                # PLS-1507: shadow only. Reaching here means the resolver
+                # admitted the seat (cap refusal returns no email and never
+                # gets here), so queue-mode's verdict is admit. The legacy
+                # push above is unchanged.
+                try:
+                    from .services.assignment_shadow import record_shadow_verdict
+                    record_shadow_verdict('queue_assign', 'admit', locked.assignment_group)
+                except Exception:
+                    logger.warning('PLS-1507 shadow record failed', exc_info=True)
         except Exception:
             logger.exception('queue-assign resolve failed for %s', item.item_key)
             if current is not None:
