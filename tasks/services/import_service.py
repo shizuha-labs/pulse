@@ -18,7 +18,7 @@ import io
 import json
 import zipfile
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
@@ -74,7 +74,7 @@ def _parse_dt(value) -> Optional[datetime]:
     if dt is None:
         return None
     if timezone.is_naive(dt):
-        dt = timezone.make_aware(dt, timezone.utc)
+        dt = timezone.make_aware(dt, dt_timezone.utc)
     return dt
 
 

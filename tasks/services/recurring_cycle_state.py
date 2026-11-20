@@ -14,7 +14,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any, Optional
 
 from django.db import transaction
@@ -577,7 +577,7 @@ def _as_aware_dt(value) -> Optional[datetime]:
     if not isinstance(value, datetime):
         return None
     if timezone.is_naive(value):
-        value = timezone.make_aware(value, timezone.utc)
+        value = timezone.make_aware(value, dt_timezone.utc)
     return value
 
 

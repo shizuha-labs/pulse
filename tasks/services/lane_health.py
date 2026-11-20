@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 import threading
 from collections import Counter
+from datetime import timezone as dt_timezone
 from typing import Optional
 
 from django.conf import settings
@@ -549,7 +550,7 @@ def _rollout_in_progress() -> bool:
     except (TypeError, ValueError):
         return False
     if timezone.is_naive(changed_at):
-        changed_at = timezone.make_aware(changed_at, timezone.utc)
+        changed_at = timezone.make_aware(changed_at, dt_timezone.utc)
     return (timezone.now() - changed_at).total_seconds() <= _ROLLOUT_WINDOW_SECONDS
 
 
