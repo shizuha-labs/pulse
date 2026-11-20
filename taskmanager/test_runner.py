@@ -66,17 +66,23 @@ def _load_reference_data(database='default'):
     _reset_reference_sequences(database)
 
 
-def _reference_data_flush(self):
+@classmethod
+def _reference_data_flush(cls):
     """Wrap TransactionTestCase._fixture_teardown to restore reference data
     after each flush, so retained parallel clones never serve missing
-    workflows/statuses to subsequent tests."""
+    workflows/statuses to subsequent tests.
+
+    Django 5.2 calls _fixture_teardown as a classmethod (cls._fixture_teardown()).
+    A plain function assigned onto the class is then invoked with no instance,
+    which raises TypeError before any test in the class runs.
+    """
     from django.db import connections
 
-    for db_name in self._databases_names(include_mirrors=False):
+    for db_name in cls._databases_names(include_mirrors=False):
         inhibit_post_migrate = (
-            self.available_apps is not None
+            cls.available_apps is not None
             or (
-                self.serialized_rollback
+                cls.serialized_rollback
                 and hasattr(connections[db_name], '_test_serialized_contents')
             )
         )
@@ -86,7 +92,7 @@ def _reference_data_flush(self):
             interactive=False,
             database=db_name,
             reset_sequences=False,
-            allow_cascade=self.available_apps is not None,
+            allow_cascade=cls.available_apps is not None,
             inhibit_post_migrate=inhibit_post_migrate,
         )
         try:
@@ -98,14 +104,21 @@ def _reference_data_flush(self):
             pass
 
 
-_original_fixture_setup = testcases.TransactionTestCase._fixture_setup
+# Django 5.2 declares _fixture_setup as a classmethod. Accessing it on the
+# class returns a bound method, so calling that saved object with cls passes
+# the class twice. Keep the raw function and pass cls once.
+_original_fixture_setup = testcases.TransactionTestCase._fixture_setup.__func__
 
 
-def _reference_data_fixture_setup(self):
+@classmethod
+def _reference_data_fixture_setup(cls):
     """After Django's setup (including reset_sequences=True → setval 1), reload
-    reference data and re-advance serial sequences past max(id)."""
-    _original_fixture_setup(self)
-    for db_name in self._databases_names(include_mirrors=False):
+    reference data and re-advance serial sequences past max(id).
+
+    Django 5.2 calls this as a classmethod. See _reference_data_flush.
+    """
+    _original_fixture_setup(cls)
+    for db_name in cls._databases_names(include_mirrors=False):
         try:
             _load_reference_data(db_name)
         except Exception:

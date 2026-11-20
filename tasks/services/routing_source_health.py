@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import timezone as dt_timezone
 from typing import Any, Optional
 
 from django.core.cache import cache
@@ -491,7 +492,7 @@ def evaluate_pretriage_deadline_for_item(item_id: str) -> bool:
             dt = parse_datetime(entered)
             if dt is not None:
                 if timezone.is_naive(dt):
-                    dt = timezone.make_aware(dt, timezone.utc)
+                    dt = timezone.make_aware(dt, dt_timezone.utc)
                 age_h = (timezone.now() - dt).total_seconds() / 3600.0
         except Exception:
             age_h = pretriage_age_threshold_hours()

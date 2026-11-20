@@ -11,6 +11,7 @@ push the target below the default newest page.
 """
 import logging
 import re
+from datetime import datetime, timezone as dt_timezone
 
 import requests
 from django.conf import settings
@@ -51,8 +52,16 @@ def _format_posted_at(value):
         return ''
     try:
         if timezone.is_naive(value):
-            value = timezone.make_aware(value, timezone.utc)
-        return value.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            value = timezone.make_aware(value, dt_timezone.utc)
+        # django.utils.timezone.utc was removed in Django 5.1. Convert with
+        # the stdlib UTC and format a naive clock so the Z suffix survives
+        # Django 5.2's strftime, which appends +00:00 to aware UTC values.
+        utc = value.astimezone(dt_timezone.utc)
+        plain = datetime(
+            utc.year, utc.month, utc.day,
+            utc.hour, utc.minute, utc.second,
+        )
+        return plain.strftime('%Y-%m-%dT%H:%M:%SZ')
     except Exception:
         return str(value)
 
