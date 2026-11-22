@@ -2192,6 +2192,7 @@ def create_task(
     origin_check: Optional[str] = None,
     origin_image: Optional[str] = None,
     allow_duplicate: bool = False,
+    client_request_id: Optional[str] = None,
 ) -> str:
     """
     Create a new task.
@@ -2511,9 +2512,38 @@ def create_task(
         )
     # ─────────────────────────────────────────────────────────────────────────
 
+    # PLAT-10624: a read-timeout can land the row and still fail the client.
+    # An omitted key must still be stable across a retry of the same payload.
+    # A fresh uuid would make the retry a second insert. pulse#734's
+    # dedup_key is not this token, and its error_code may not be deployed.
+    import hashlib as _hashlib
+    request_key = (client_request_id or '').strip()
+    if not request_key:
+        material = json.dumps(
+            {"endpoint": "/items/", "data": data},
+            sort_keys=True,
+            default=str,
+        )
+        request_key = "payload:" + _hashlib.sha256(material.encode()).hexdigest()[:32]
+    data['client_request_id'] = request_key
     result = api_request("POST", "/items/", data=data)
+    err = str(result.get('error') or '') if isinstance(result, dict) else ''
+    timed_out = (
+        isinstance(result, dict)
+        and (
+            result.get('error_code') == 'pulse_transport_timeout'
+            or 'timed out' in err.lower()
+            or 'Read timed out' in err
+        )
+    )
+    if timed_out:
+        result = api_request("POST", "/items/", data=data)
     if "error" in result:
-        return _fmt_error(result)
+        return (
+            f"{_fmt_error(result)}\n"
+            f"client_request_id={request_key} — retry pulse_create_task with this "
+            f"same id; do not file a second task."
+        )
 
     item_id = result["id"]
 
