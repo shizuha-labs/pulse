@@ -243,7 +243,7 @@ class ItemSerializer(OwnerActionPolicyMixin, serializers.ModelSerializer):
         model = Item
         fields = [
             # Identity
-            'id', 'mode', 'item_type', 'item_key',
+            'id', 'mode', 'item_type', 'item_key', 'client_request_id',
 
             # Project
             'project', 'project_key', 'project_name',

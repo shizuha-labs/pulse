@@ -844,6 +844,15 @@ class Item(models.Model):
         unique=True,
         help_text="Project-scoped key like PROJ-123"
     )
+    # PLAT-10624: caller-supplied create idempotency. A read-timeout retry that
+    # repeats this key returns the original Item instead of inserting another.
+    client_request_id = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Optional caller idempotency key for task create retries.",
+    )
 
     # === Assignment ===
     assignee_id = models.IntegerField(null=True, blank=True, help_text="User ID from auth service")
@@ -2607,6 +2616,13 @@ class Item(models.Model):
             models.Index(fields=['fix_version']),
         ]
         constraints = [
+            # PLAT-10624: replay is scoped to the creator. A global unique
+            # would collide two callers who reused a key.
+            models.UniqueConstraint(
+                fields=['created_by_id', 'client_request_id'],
+                condition=Q(client_request_id__isnull=False) & ~Q(client_request_id=''),
+                name='tasks_item_creator_request_id_uniq',
+            ),
             # Only one active (firing/acknowledged) alert per fingerprint
             models.UniqueConstraint(
                 fields=['fingerprint'],

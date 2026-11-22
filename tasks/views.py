@@ -2777,6 +2777,32 @@ class ItemViewSet(viewsets.ModelViewSet):
                 return
             locked.delete()
 
+    def _client_request_replay(self, request):
+        """PLAT-10624: same creator + client_request_id returns the original item.
+
+        The create may already have committed when the client read-timeout
+        fires. Replaying the key must not insert a second row.
+        """
+        try:
+            raw = request.data.get('client_request_id') or ''
+        except Exception:
+            raw = ''
+        key = str(raw).strip()
+        user_id = getattr(getattr(request, 'user', None), 'id', None)
+        if not key or not user_id:
+            return None
+        existing = Item.objects.filter(
+            created_by_id=user_id, client_request_id=key,
+        ).first()
+        if existing is None:
+            return None
+        return self._replay_existing(existing)
+
+    def _replay_existing(self, existing):
+        """200 body for a create that already committed (timeout or unique race)."""
+        serializer = self.get_serializer(existing)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
     def create(self, request, *args, **kwargs):
         """HIVE-1223: guarantee a fresh org (zero projects) can create its FIRST
         task. When ``mode=task``, no ``project`` is supplied, and the resolved org
@@ -2787,6 +2813,9 @@ class ItemViewSet(viewsets.ModelViewSet):
         (project supplied, or the org already has projects) is byte-unchanged: it
         falls straight through to the default ModelViewSet.create.
         """
+        replay = self._client_request_replay(request)
+        if replay is not None:
+            return replay
         data = request.data
         if data.get('mode', 'task') == 'task' and not data.get('project'):
             org_id = _ensure_explicit_org_membership(request)
@@ -3222,7 +3251,22 @@ class ItemViewSet(viewsets.ModelViewSet):
             # Generate item_key for project items
             extra_data['item_key'] = project.get_next_item_key()
 
-        item = serializer.save(**extra_data)
+        try:
+            # Savepoint: a unique collision aborts only this insert, so the
+            # outer atomic can still re-read the winner (PLAT-10624).
+            with transaction.atomic():
+                item = serializer.save(**extra_data)
+        except IntegrityError:
+            key = str(serializer.validated_data.get('client_request_id') or '').strip()
+            existing = None
+            if key and user.id:
+                existing = Item.objects.filter(
+                    created_by_id=user.id, client_request_id=key,
+                ).first()
+            if existing is None:
+                raise
+            serializer.instance = existing
+            return self._replay_existing(existing)
         if item.assignment_group:
             try:
                 from .services.workflow_service import WorkflowService
