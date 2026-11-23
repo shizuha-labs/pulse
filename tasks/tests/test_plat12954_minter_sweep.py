@@ -29,11 +29,14 @@ from tasks.models import DeploymentEvent
 
 HEAD_SHA = 'a' * 40
 RUN_ID = '10499'
+RUN_NUMBER = '3612'
 
 RUNS_RESPONSE = {
     'workflow_runs': [
-        {'id': RUN_ID, 'status': 'success', 'head_sha': HEAD_SHA,
-         'path': '.forgejo/workflows/deploy.yml',
+        # PLAT-7439: the live tasks payload carries workflow_id and
+        # run_number, and has no path. The sidecar keys logs by run_number.
+        {'id': RUN_ID, 'run_number': RUN_NUMBER, 'status': 'success',
+         'head_sha': HEAD_SHA, 'workflow_id': 'deploy.yml',
          'run_started_at': '2026-11-10T10:00:00Z'},
     ],
 }
@@ -102,6 +105,10 @@ class MinterSweepTests(TestCase):
             (event.metadata or {}).get('minted_by'), 'plat12954-minter')
         self.assertTrue(
             (event.metadata or {}).get('rollout_proof', {}).get('image_digest'))
+        fetched = [c.args[0] for c in get_mock.call_args_list]
+        self.assertTrue(
+            any(f'run={RUN_NUMBER}' in url for url in fetched),
+            f'sidecar log url should key by run_number, fetched {fetched}')
 
     @mock.patch.dict('os.environ', {'FORGEJO_TOKEN': 'tok',
                                     'SHIZUHA_ID_TOKEN': 'idtok'})

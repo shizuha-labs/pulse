@@ -52,8 +52,13 @@ DEFAULT_CI_LOGS = os.environ.get(
 
 # v1 allowlist: fleet repos with an active deploy lane. Extend as repos
 # land deployment workflows (documented on PLAT-12954).
-DEFAULT_REPOS = ('search', 'hive', 'pulse', 'cortex', 'deploy', 'home')
+# PLAT-7439: drive, and the services whose deploy lanes were missing from the
+# sweep (wiki, notes, books, mail, finance, id, admin).
+DEFAULT_REPOS = ('search', 'hive', 'pulse', 'cortex', 'deploy', 'home',
+                 'drive', 'wiki', 'notes', 'books', 'mail', 'finance', 'id', 'admin')
 DEFAULT_WORKFLOW = 'deploy.yml'
+# The frontend lanes roll out the same way and print the same proof line.
+DEFAULT_WORKFLOWS = ('deploy.yml', 'deploy-frontend.yml')
 
 # Rollout-proof markers parsed from the run log (the deploy lane's own
 # receipt lines / kubectl output). Every marker below must be present and
@@ -65,6 +70,10 @@ _PROOF_PATTERNS = {
     'desired_replicas': re.compile(r'(?:desired|spec)\.replicas[:=]\s*(\d+)', re.I),
     'ready_replicas': re.compile(r'readyReplicas[:=]\s*(\d+)', re.I),
     'image_digest': re.compile(r'imageID[:=]\s*\S+@sha256:([0-9a-f]{64})', re.I),
+    # PLAT-7439: the deploy lanes print kubectl's own rollout line, not the
+    # structured markers above. "deployment \"cortex\" successfully rolled out"
+    # is the lane's proof that the rollout converged.
+    'rolled_out': re.compile(r'deployment "([^"]+)" successfully rolled out'),
 }
 
 
@@ -97,7 +106,7 @@ class Command(BaseCommand):
         parser.add_argument('--org', default='shizuha-labs')
         parser.add_argument('--forgejo-url', default=DEFAULT_FORGEJO)
         parser.add_argument('--ci-logs-url', default=DEFAULT_CI_LOGS)
-        parser.add_argument('--workflow', default=DEFAULT_WORKFLOW)
+        parser.add_argument('--workflow', default=','.join(DEFAULT_WORKFLOWS))
         parser.add_argument('--repos', default=','.join(DEFAULT_REPOS))
         parser.add_argument('--dry-run', action='store_true')
 
@@ -142,11 +151,18 @@ class Command(BaseCommand):
                 if not concluded:
                     continue
                 run_id = str(run.get('id') or run.get('number') or '')
+                # PLAT-7439: the ci-logs sidecar keys logs by run_number. The
+                # task id (run['id']) 404s there, so the proof fetch never
+                # returned a log.
+                run_number = str(run.get('run_number') or '')
                 head_sha = (run.get('head_sha') or '').strip()
-                workflow = (run.get('path') or '').rsplit('/', 1)[-1]
-                if not run_id or not head_sha:
+                # The tasks payload has no 'path'. workflow_id carries the
+                # workflow file name (e.g. 'deploy.yml').
+                workflow = (run.get('workflow_id') or run.get('path') or '').rsplit('/', 1)[-1]
+                if not run_id or not run_number or not head_sha:
                     continue
-                if workflow and workflow != opts['workflow']:
+                wanted = tuple(w.strip() for w in opts['workflow'].split(',') if w.strip())
+                if workflow not in wanted:
                     continue
                 summary['runs_scanned'] += 1
                 # (b) production-head ancestry
@@ -165,7 +181,7 @@ class Command(BaseCommand):
                     continue
                 # (c) rollout proof from the run log (fail-closed)
                 proof = self._parse_rollout_proof(
-                    opts['forgejo_url'], org, repo, run_id)
+                    opts['forgejo_url'], org, repo, run_id, run_number)
                 if not self._proof_converged(proof):
                     summary['skipped_unverifiable'] += 1
                     continue
@@ -226,7 +242,7 @@ class Command(BaseCommand):
                            org, repo, exc)
         return False
 
-    def _parse_rollout_proof(self, base, org, repo, run_id):
+    def _parse_rollout_proof(self, base, org, repo, run_id, run_number):
         """Fetch the run log and parse the rollout proof markers.
 
         Proof-source order (no NEW credential — PLAT-12954 trust boundary;
@@ -261,7 +277,7 @@ class Command(BaseCommand):
             base_logs = DEFAULT_CI_LOGS.rstrip('/')
             if not base_logs.endswith('/logs'):
                 base_logs += '/logs'
-            urls.append((f'{base_logs}?repo={org}/{repo}&run={run_id}',
+            urls.append((f'{base_logs}?repo={org}/{repo}&run={run_number}',
                          sidecar_token, 'Bearer'))
         forgejo_token = os.environ.get('FORGEJO_TOKEN', '').strip()
         if forgejo_token:
@@ -300,6 +316,12 @@ class Command(BaseCommand):
         ready == desired + image digest parsed. Anything less is
         unverifiable (never fabricated)."""
         try:
+            # PLAT-7439: kubectl's "deployment <name> successfully rolled out"
+            # is the lane's own convergence proof. The structured markers are
+            # not printed by the deploy lanes, so requiring them skipped every
+            # real rollout.
+            if proof.get('rolled_out'):
+                return True
             if not proof.get('deployment_uid') or not proof.get('image_digest'):
                 return False
             observed = int(proof.get('generation', '0') or 0)
