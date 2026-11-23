@@ -816,18 +816,33 @@ class SubstrateReceiptRevalidationTests(SimpleTestCase):
 class TeamSlugLocalGateTests(SimpleTestCase):
     """PLAT-5228: do not call Hive for a slug it would 400."""
 
-    def _verdict(self, group):
+    def _verdict(self, group, intent='assign'):
         from tasks.services.workflow_service import WorkflowService
-        item = type('Item', (), {'assignment_group': group})()
+        item = type('Item', (), {'assignment_group': group, '_substrate_write_intent': intent})()
         with mock.patch.object(WorkflowService, '_capability_evidence_request') as build:
             verdict = WorkflowService._substrate_evidence_verdict(
                 'mio@shizuha.com', item, ['kubeconfig'], 'shadow')
         build.assert_not_called()
         return verdict
 
-    def test_empty_assignment_group_skips_hive(self):
-        verdict = self._verdict('')
+    def test_empty_assignment_group_on_assign_holds(self):
+        # A concrete assign with no team is a real hold: enforce must deny it.
+        verdict = self._verdict('', intent='assign')
         self.assertEqual(verdict.reason, 'no_assignment_group')
+        self.assertEqual(verdict.outcome, ce.OUTCOME_AUTHORITY_UNKNOWN)
+
+    def test_empty_assignment_group_on_system_write_is_not_a_mismatch(self):
+        # PLS-1525: retain/resume/system name no new team. outcome off does
+        # not authorize, so the shadow breadcrumb records mismatch=false
+        # against a legacy deny and enforce does not deny the write.
+        for intent in ('retain', 'resume', 'system'):
+            verdict = self._verdict('', intent=intent)
+            self.assertEqual(verdict.reason, 'no_assignment_group', intent)
+            self.assertEqual(verdict.outcome, ce.OUTCOME_OFF, intent)
+            self.assertFalse(verdict.authorizes)
+
+    def test_empty_assignment_group_on_transfer_holds(self):
+        verdict = self._verdict('', intent='transfer')
         self.assertEqual(verdict.outcome, ce.OUTCOME_AUTHORITY_UNKNOWN)
 
     def test_underscore_slug_fails_closed_locally(self):

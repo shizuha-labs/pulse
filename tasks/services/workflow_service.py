@@ -20330,12 +20330,26 @@ class WorkflowService:
         caps = sorted(substrate_caps)
         # PLAT-5228: Hive rejects a team slug that is not lowercase letters,
         # digits and hyphens with a 400 before any membership lookup. An empty
-        # assignment group is not a failure — there is no team to ask about.
-        # A slug outside that shape fails closed locally. Neither calls Hive,
-        # and neither normalizes the slug.
+        # assignment group is not a team, so it is not a Hive question.
+        # PLS-1525: that skip must not be authority_unknown. Under shadow the
+        # breadcrumb counts authority_unknown against a legacy-ok seat as a
+        # mismatch, and under enforce it denies the write. A concrete assign
+        # or transfer with a blank group is still a hold: the writer asked for
+        # an owner without naming a team. retain/resume/system (a status-only
+        # save, an unblock, a rebalance or failover) name no new team, so they
+        # are a skip (outcome off): not a mismatch, and not a deny. A slug
+        # outside the Hive shape fails closed locally. None of these call
+        # Hive, and none normalize the slug.
         team_slug = str(getattr(item, 'assignment_group', '') or '')
         if not team_slug:
-            return _ce.SubstrateVerdict(mode, _ce.OUTCOME_AUTHORITY_UNKNOWN, 'no_assignment_group')
+            try:
+                intent = WorkflowService._resolve_assignment_intent(item)
+            except Exception:
+                intent = 'assign'
+            if intent in ('assign', 'transfer'):
+                return _ce.SubstrateVerdict(
+                    mode, _ce.OUTCOME_AUTHORITY_UNKNOWN, 'no_assignment_group')
+            return _ce.SubstrateVerdict(mode, _ce.OUTCOME_OFF, 'no_assignment_group')
         if not _ce.HIVE_TEAM_SLUG_RE.fullmatch(team_slug):
             return _ce.SubstrateVerdict(mode, _ce.OUTCOME_AUTHORITY_UNKNOWN, 'team_slug_invalid')
         try:
