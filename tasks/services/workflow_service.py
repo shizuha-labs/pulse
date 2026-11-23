@@ -20404,6 +20404,13 @@ class WorkflowService:
             'workflow': str(getattr(item, 'workflow_name', '') or '')[:100],
             'stage': str(getattr(item, 'status', '') or '')[:64],
             'intent': intent,
+            # PLAT-13806: the audit row's subject_id and routing_team_id columns
+            # stay null because the shadow path has no user or team row, so the
+            # seat was lost. The raw email must not enter the payload (the shadow
+            # breadcrumb test forbids it), so store its hash: stable, joinable
+            # back to a seat, and not the address itself.
+            'subject_email_sha256': hashlib.sha256(subject.encode('utf-8')).hexdigest(),
+            'team_slug': str(getattr(item, 'assignment_group', '') or '')[:64],
             'materialization_generation': str(
                 getattr(receipt, 'materialization_generation', '') or '')[:128],
             'producer_generation_id': str(
