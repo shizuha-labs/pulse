@@ -5952,6 +5952,24 @@ class WorkflowService:
         # smoke_passed row over a complete verified_by_qa row and reject a
         # satisfied task (missing_live_probe_or_qa etc.). qs is ordered by
         # -updated_at, so within each state class the newest wins.
+        # PLAT-13706 recurrence (2026-11-16, post-pulse#1016): callers WITHOUT
+        # an explicit budget reach this loop on a gunicorn SYNC worker thread
+        # — the ingest path gets here via focused-QA spawn
+        # (``_focused_qa_origin_deploy_evidence_carried``) — and the candidate
+        # loop is unbounded: up to ``proof_budget`` proof waits ×
+        # ``_COMPARE_SYNC_WAIT_SECONDS`` each. The per-compare 8s cap bounds
+        # ONE wait, not the loop, so the worker starves the arbiter heartbeat
+        # and is aborted mid-request (500 empty body, no event row) even after
+        # the pulse#1016 cure. Default to the SAME wall-clock budget the gate
+        # evaluation establishes (``PULSE_COMPARE_WALL_CLOCK_SECONDS``); once
+        # spent, remaining candidates are refused without touching the wire.
+        # Explicit ``budget_end`` callers (the gate itself) are unchanged.
+        if budget_end is None:
+            import time as _time
+            budget_end = (
+                _time.monotonic()
+                + WorkflowService._resolve_wall_clock_seconds()
+            )
         best = None
         best_state = None
         # Bounded Origin ancestry round-trips per close attempt (the widened
