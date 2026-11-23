@@ -522,6 +522,101 @@ class AtomicWipAdmissionTests(TransactionTestCase):
         ordinary.refresh_from_db()
         self.assertEqual(urgent.assignee_email, self.EMAIL)
         self.assertFalse(ordinary.assignee_email)
+    def test_awaiting_deploy_holder_passes_active_admission(self):
+        """PLAT-7482: merged-awaiting-deploy work is not hands-on ACTIVE WIP.
+
+        A cap-enforced seat holding only ``awaiting_deploy`` items (post-merge,
+        zero hands-on time — the work waits on the deploy lane) must pass
+        active-capacity admission for a NEW Start Work. Before the fix the
+        reservation count read awaiting_deploy as hands-on (category
+        in_progress, outside the PLAT-390 reclass), denying every Start Work
+        with a counter the seat's own in_progress verification can't see
+        (ichi live incident, PLAT-7461).
+        """
+        from tasks.models import Item
+
+        for idx in range(2):
+            Item.objects.create(
+                title=f'merged awaiting deploy {idx}', mode='task',
+                status='awaiting_deploy', priority='high',
+                assignment_group='review',
+                assignee_id=self.UID, assignee_email=self.EMAIL,
+                workflow_name='autonomous-dev', project=self.project,
+            )
+        candidate = Item.objects.create(
+            title='fresh start work candidate', mode='task', status='open',
+            priority='urgent', assignment_group='review',
+            assignee_id=self.UID, assignee_email=self.EMAIL,
+            workflow_name='autonomous-dev', project=self.project,
+        )
+
+        with patch('tasks.liveness.record_heartbeat'):
+            admitted = WorkflowService._reserve_wip_slot(
+                candidate,
+                self.UID,
+                self.EMAIL,
+                status_override='in_progress',
+            )
+
+        self.assertTrue(admitted)
+        diagnostics = candidate._wip_capacity_diagnostics
+        self.assertEqual(diagnostics['slot_kind'], 'active')
+        self.assertEqual(diagnostics['actual'], 0)
+        self.assertEqual(diagnostics['cap'], 1)
+
+    def test_awaiting_deploy_target_consumes_ready_dimension(self):
+        """PLAT-7482: a transition INTO awaiting_deploy reserves a READY slot.
+
+        The merge→awaiting_deploy handoff leaves the actor's hands (the item
+        waits on the deploy lane), so the reservation must read the READY
+        capacity dimension, not ACTIVE.
+        """
+        from tasks.models import Item
+
+        candidate = Item.objects.create(
+            title='merge handoff candidate', mode='task', status='awaiting_merge',
+            priority='high', assignment_group='review',
+            assignee_id=self.UID, assignee_email=self.EMAIL,
+            workflow_name='autonomous-dev', project=self.project,
+        )
+
+        with patch('tasks.liveness.record_heartbeat'):
+            admitted = WorkflowService._reserve_wip_slot(
+                candidate,
+                self.UID,
+                self.EMAIL,
+                status_override='awaiting_deploy',
+            )
+
+        self.assertTrue(admitted)
+        self.assertEqual(
+            candidate._wip_capacity_diagnostics['slot_kind'], 'ready',
+        )
+
+    def test_awaiting_deploy_capacity_view_is_ready_via_pipeline_set(self):
+        """PLAT-7482: awaiting_deploy reclass lands on the capacity READY dimension.
+
+        The per-status focus-guard classifier keeps main's settled PLAT-9151
+        semantics — awaiting_deploy is excluded as held provenance, so
+        ``_slot_kind_for_status`` returns None (focus guard non-fires). The
+        CAPACITY dimension classifies it 'ready' (in-flight, not hands-on):
+        ``_capacity_slot_kind_for_status`` reclasses every
+        _REVIEW_PIPELINE_STATUSES slug unconditionally, so transitions INTO
+        awaiting_deploy reserve a ready slot (diagnostics slot_kind='ready')
+        instead of being silently refused, and the set-based ready view
+        agrees with the per-status classifier.
+        """
+        self.assertIsNone(WorkflowService._slot_kind_for_status('awaiting_deploy'))
+        self.assertEqual(
+            WorkflowService._capacity_slot_kind_for_status('awaiting_deploy'),
+            'ready',
+        )
+        self.assertIn(
+            'awaiting_deploy', WorkflowService._slot_statuses('ready'),
+        )
+        self.assertNotIn(
+            'awaiting_deploy', WorkflowService._slot_statuses('active'),
+        )
 
     def test_denied_candidate_releases_savepoint_lock_before_resolver_scans_next(self):
         """Two production-order resolver scans cannot deadlock on denied seats.

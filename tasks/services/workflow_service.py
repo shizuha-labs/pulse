@@ -22063,7 +22063,13 @@ class WorkflowService:
     # toward the loose in-flight bound but NOT the tight active (hands-on) routing
     # cap, so an engineer whose submissions sit in review isn't read as "full"
     # (PLAT-307/PLAT-375 starvation: sara = 0 in_progress + 4 in_review).
-    _REVIEW_PIPELINE_STATUSES = {'in_review', 'in_qa', 'awaiting_merge', 'applied'}
+    # PLAT-7482: ``awaiting_deploy`` (PLS-675) is the same class — post-merge,
+    # zero hands-on time, waiting on the deploy lane — but migration 0148 seeded
+    # it with category='in_progress' and never joined the PLAT-390 reclass, so
+    # cap-enforced seats holding merged-awaiting-deploy work were denied every
+    # Start Work with a counter their own in_progress verification can't see
+    # (ichi live incident, PLAT-7461).
+    _REVIEW_PIPELINE_STATUSES = {'in_review', 'in_qa', 'awaiting_merge', 'applied', 'awaiting_deploy'}
 
     # Operator directive 2026-09-17: leads are removed as a concept. Team
     # members are undifferentiated peers — assignment is uniformly
@@ -22411,10 +22417,19 @@ class WorkflowService:
         only capacity admission uses this helper.
         """
         kind = WorkflowService._slot_kind_for_status(status_slug)
-        if kind == 'active':
-            status_slug = (status_slug or '').strip().lower()
-            if status_slug in WorkflowService._REVIEW_PIPELINE_STATUSES:
-                return 'ready'
+        status_slug = (status_slug or '').strip().lower()
+        # PLAT-7482: the pipeline reclass is not conditional on slot_kind being
+        # 'active'. awaiting_deploy is PLAT-9151 held provenance
+        # (_slot_kind_for_status → None), yet it still consumes the READY
+        # capacity dimension on transitions INTO it (merge→awaiting_deploy
+        # reserves a ready slot, diagnostics slot_kind='ready'). Classifying it
+        # None made _reserve_wip_slot refuse every merge handoff with a silent
+        # non-admission — the set-based ready view
+        # (_slot_statuses('ready') ⊇ _REVIEW_PIPELINE_STATUSES) and the
+        # per-status classifier disagreed. Capacity dimension only: the focus
+        # guard keeps _slot_kind_for_status's None.
+        if status_slug in WorkflowService._REVIEW_PIPELINE_STATUSES:
+            return 'ready'
         return kind
 
     @staticmethod
@@ -22460,7 +22475,19 @@ class WorkflowService:
             # the canonical status catalog, but it is parked dependency work,
             # not an executing WIP seat.  Fine-grained exclusion must win over
             # the broad category just as it does in _slot_kind_for_status().
-            return slugs - WorkflowService._assignment_excluded_statuses()
+            # PLAT-7482: this set feeds CAPACITY accounting (_agent_slot_queryset
+            # → _reserve_wip_slot / _verify_wip_reservation / cap probes), so it
+            # must read the PLAT-390 capacity view — review-pipeline work is
+            # in-flight, not hands-on, and counts on the READY dimension (the
+            # reclaim sweep already applies this same subtraction,
+            # tasks._reclaim_wip_overload). The focus guard does NOT consume
+            # this set (it classifies per-status via _slot_kind_for_status), so
+            # pipeline seats stay occupied/preempted as before.
+            return (
+                slugs
+                - WorkflowService._assignment_excluded_statuses()
+                - WorkflowService._REVIEW_PIPELINE_STATUSES
+            )
         excluded = WorkflowService._assignment_excluded_statuses()
         active = WorkflowService._slot_statuses('active')
         ready = set(
@@ -22468,9 +22495,10 @@ class WorkflowService:
             .values_list('slug', flat=True)
         ) - excluded - active | {'open', 'todo', 'pending'}
         # PLAT-390 two-tier: capacity admission counts review-pipeline work on
-        # the READY dimension (in-flight, not hands-on). It is part of the
-        # *active* seat set for focus-guard purposes (_slot_statuses('active')
-        # keeps it), so add it back here for the capacity ready-slot count.
+        # the READY dimension (in-flight, not hands-on). Belt-and-braces: the
+        # pipeline is also re-added explicitly in case a future exclusion set
+        # or category drift removes individual slugs from the broad candidate
+        # set above.
         ready |= WorkflowService._REVIEW_PIPELINE_STATUSES
         return ready
 
