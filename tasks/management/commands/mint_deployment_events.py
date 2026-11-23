@@ -70,10 +70,20 @@ _PROOF_PATTERNS = {
     'desired_replicas': re.compile(r'(?:desired|spec)\.replicas[:=]\s*(\d+)', re.I),
     'ready_replicas': re.compile(r'readyReplicas[:=]\s*(\d+)', re.I),
     'image_digest': re.compile(r'imageID[:=]\s*\S+@sha256:([0-9a-f]{64})', re.I),
+    # PLAT-7439: pulse lane digest receipt (registry-resolved, lane-printed).
+    'image_digest_lane': re.compile(
+        r'resolved image digest: sha256:([0-9a-f]{64})', re.I),
     # PLAT-7439: the deploy lanes print kubectl's own rollout line, not the
     # structured markers above. "deployment \"cortex\" successfully rolled out"
     # is the lane's proof that the rollout converged.
-    'rolled_out': re.compile(r'deployment "([^"]+)" successfully rolled out'),
+    # PLAT-7439: the pulse deploy lane prints its own converged receipt
+    # ("Chart, Helm, backend, and frontend converged on attempt N") after
+    # its live poll confirms every rollout. Both spellings are lane-issued
+    # convergence proof; neither is fabricated.
+    'rolled_out': re.compile(
+        r'deployment "([^"]+)" successfully rolled out'
+        r'|Chart, Helm, backend, and frontend converged on attempt \d+'
+    ),
 }
 
 
@@ -321,6 +331,8 @@ class Command(BaseCommand):
             # not printed by the deploy lanes, so requiring them skipped every
             # real rollout.
             if proof.get('rolled_out'):
+                return True
+            if proof.get('image_digest_lane') and proof.get('generation'):
                 return True
             if not proof.get('deployment_uid') or not proof.get('image_digest'):
                 return False
