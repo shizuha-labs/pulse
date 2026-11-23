@@ -14,6 +14,20 @@ from .connect_origin import system_message_headers
 
 logger = logging.getLogger(__name__)
 
+_REPEATED_TOKEN = re.compile(r'(.{2,}?)\1{5,}')
+
+
+def _bounded_notice_excerpt(content: str, limit: int = 300) -> str:
+    """Cap a comment quoted into a system notice.
+
+    CON-433: a comment carrying a degenerate run of repeated tokens was relayed
+    verbatim into the assignment notice, and the receiving agent treated the
+    garbage as part of the task. Collapse any token repeated six or more times
+    before truncating, so a poisoned comment can't fill the notice.
+    """
+    collapsed = _REPEATED_TOKEN.sub(lambda match: match.group(1), content or '')
+    return collapsed[:limit]
+
 _PRIORITY_RANK = {
     'urgent': 0,
     'high': 1,
@@ -859,7 +873,7 @@ This notification was delegated to you from the user you assist. Review it and i
                     latest_comment = Comment.objects.filter(item_id=item.id).order_by('-created_at').first()
                     if latest_comment:
                         author = latest_comment.author_name or latest_comment.author_email or 'unknown'
-                        comment_line = f'\n\nLatest comment from {author}:\n"{latest_comment.content[:300]}"'
+                        comment_line = f'\n\nLatest comment from {author}:\n"{_bounded_notice_excerpt(latest_comment.content)}"'
                 except Exception:
                     pass
                 connect_base_url = getattr(settings, 'SHIZUHA_CONNECT_API_URL', 'http://shizuha-connect:8019/api').rstrip('/')
@@ -944,7 +958,7 @@ This notification was delegated to you from the user you assist. Review it and i
                     latest_comment = Comment.objects.filter(item_id=item.id).order_by('-created_at').first()
                     if latest_comment:
                         author = latest_comment.author_name or latest_comment.author_email or 'unknown'
-                        comment_line = f'\n\nLatest comment from {author}:\n"{latest_comment.content[:300]}"'
+                        comment_line = f'\n\nLatest comment from {author}:\n"{_bounded_notice_excerpt(latest_comment.content)}"'
                 except Exception:
                     pass
                 recurring_line = ''
