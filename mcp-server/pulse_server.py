@@ -587,6 +587,33 @@ def _transport_dedup_key(method: str, endpoint: str, data: Optional[dict]) -> st
         default=str,
     )
     return _hashlib.sha256(material.encode()).hexdigest()[:16]
+def _wip_capacity_diagnostics_text(detail_obj) -> str:
+    """Render the WIP-capacity diagnostics block when an error body carries it.
+
+    PLAT-7482: the Start Work refusal (WIP_ACTIVE_CAPACITY_DENIED) and the
+    direct-assignment denial (wip_capacity_denied) flatten the typed
+    ``_wip_capacity_diagnostics`` snapshot into the response body's top level,
+    but _fmt_error rendered only the prose — the actor could not see WHAT filled
+    the counter (actual/pending/cap/owner), so a "provably zero in_progress"
+    seat vs a full counter was undiagnosable from the error surface. Returns ''
+    when the body carries no diagnostics.
+    """
+    if not isinstance(detail_obj, dict):
+        return ""
+    if "reservation_owner" not in detail_obj and detail_obj.get("code") != "WIP_ACTIVE_CAPACITY_DENIED":
+        return ""
+    parts = []
+    for key in ("actual", "pending", "cap", "slot_kind"):
+        if detail_obj.get(key) is not None:
+            parts.append(f"{key}={detail_obj[key]}")
+    owner = detail_obj.get("reservation_owner")
+    if owner:
+        kind = detail_obj.get("reservation_owner_kind") or "unknown"
+        parts.append(f"reservation_owner={owner} ({kind})")
+    group = detail_obj.get("assignment_group")
+    if group:
+        parts.append(f"assignment_group={group}")
+    return " | ".join(parts)
 
 
 def _fmt_error(result: dict) -> str:
@@ -636,6 +663,13 @@ def _fmt_error(result: dict) -> str:
         )
         if result.get("trace"):
             transport += f"\nTrace: {result['trace']}"
+
+    # PLAT-7482: when the failing body carries the WIP-capacity diagnostics
+    # snapshot, render it so the actor can see what filled the counter instead
+    # of a bare "capacity is full" sentence.
+    wip_text = _wip_capacity_diagnostics_text(detail_obj)
+    if wip_text:
+        outage_hint = f"{outage_hint}\nWIP capacity: {wip_text}"
 
     return f"Error: {result['error']}\nDetail: {detail_text}{marker_text}{outage_hint}{transport}"
 

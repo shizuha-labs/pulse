@@ -11309,9 +11309,9 @@ def _reclaim_wip_overload():
     cutoff = timezone.now() - timedelta(minutes=max(1, ttl_minutes))
     # PLAT-390 two-tier: capacity reclaim reads the review pipeline as READY
     # (in-flight, not hands-on) so a review-lane item is reclaimed once on the
-    # ready dimension, never twice (active + ready). _slot_statuses('active')
-    # keeps the pipeline for focus-guard seat protection; capacity paths use
-    # this capacity view.
+    # ready dimension, never twice (active + ready). PLAT-7482: _slot_statuses('active')
+    # now applies this capacity view itself (the pipeline is subtracted there),
+    # so this subtraction is retained as belt-and-braces for older deploys.
     active_statuses = (
         WorkflowService._slot_statuses('active')
         - WorkflowService._REVIEW_PIPELINE_STATUSES
