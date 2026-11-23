@@ -308,19 +308,33 @@ class MaterializationHighWaterAdvanceTests(TestCase):
             'materialization_superseded')
         self.assertEqual(_HW.objects.get(producer_generation_id='gen-x').iat, 2000)
 
-    def test_equal_iat_conflicting_generation_latches_ambiguous(self):
+    def test_equal_iat_newer_generation_advances_and_clears(self):
+        # PLS-1524: Hive iat is whole seconds, so two roster states in the same
+        # second must not latch the seat. A different generation at the same
+        # iat advances. A repeat of the stored generation while the row is
+        # still flagged ambiguous stays a HOLD. A strictly newer iat still
+        # clears.
+        from tasks.models import SubstrateMaterializationHighWater as _HW
         self.assertIsNone(ce.advance_materialization_high_water(
             self._ev(iat=1000, gen='mat-sha256:' + 'a' * 64)))
-        # same iat, DIFFERENT generation -> ambiguity, fail closed
+        self.assertIsNone(ce.advance_materialization_high_water(
+            self._ev(iat=1000, gen='mat-sha256:' + 'b' * 64)))
+        row = _HW.objects.get(producer_generation_id='gen-x')
+        self.assertEqual(row.materialization_generation, 'mat-sha256:' + 'b' * 64)
+        self.assertFalse(row.ambiguous)
+        # an already-latched row (written before this fix) clears on the next
+        # different generation at the same second, and stays held on a repeat
+        # of the generation it already stored.
+        row.ambiguous = True
+        row.save(update_fields=['ambiguous'])
         self.assertEqual(
             ce.advance_materialization_high_water(self._ev(iat=1000, gen='mat-sha256:' + 'b' * 64)),
             'materialization_ambiguous')
-        # the seat stays ambiguous until a strictly-newer iat resolves it
-        self.assertEqual(
-            ce.advance_materialization_high_water(self._ev(iat=1000, gen='mat-sha256:' + 'a' * 64)),
-            'materialization_ambiguous')
         self.assertIsNone(ce.advance_materialization_high_water(
-            self._ev(iat=2000, gen='mat-sha256:' + 'c' * 64)))
+            self._ev(iat=1000, gen='mat-sha256:' + 'c' * 64)))
+        row.refresh_from_db()
+        self.assertFalse(row.ambiguous)
+        self.assertEqual(row.materialization_generation, 'mat-sha256:' + 'c' * 64)
 
     def test_exact_seat_isolation(self):
         # a different team_slug is a different seat and does not interfere.

@@ -792,8 +792,14 @@ def advance_materialization_high_water(evidence):
     authorize):
       * strictly-newer signed ``iat`` advances the row and clears ambiguity;
       * a strictly-older ``iat`` is already superseded -> never rewinds -> HOLD;
-      * equal ``iat`` with a different ``materialization_generation`` latches ``ambiguous``
-        -> HOLD until a strictly-newer ``iat`` resolves it.
+      * equal ``iat`` with a different ``materialization_generation`` advances to
+        that generation and clears ambiguity. Hive stamps ``iat`` in whole
+        seconds (``produce_evidence`` uses ``int(time.time())``) while the
+        generation hashes roster state that can change inside that second, so
+        latching the first hash of the second held the seat until a later
+        second (PLS-1524). The incoming evidence is already signature-verified.
+        A repeat of the generation currently stored, while the row is still
+        flagged ambiguous, keeps the HOLD — that is a tie, not a newer roster.
     The row is row-locked so concurrent verifications serialize.
     """
     from django.db import transaction
@@ -816,12 +822,15 @@ def advance_materialization_high_water(evidence):
             return None
         if iat < row.iat:
             return 'materialization_superseded'
-        # equal iat
+        # equal iat. Hive's iat is whole seconds and the generation is a hash
+        # of roster state, so a different generation at this second is a newer
+        # materialization, not a conflict to latch (PLS-1524).
         if gen != row.materialization_generation:
-            if not row.ambiguous:
-                row.ambiguous = True
-                row.save(update_fields=['ambiguous', 'updated_at'])
-            return 'materialization_ambiguous'
+            row.materialization_generation = gen
+            row.ambiguous = False
+            row.save(update_fields=['materialization_generation', 'ambiguous',
+                                    'updated_at'])
+            return None
         if row.ambiguous:
             return 'materialization_ambiguous'
         return None
