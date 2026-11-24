@@ -208,6 +208,41 @@ class DeployVerifyMatcherCorrelationTests(TestCase):
             WorkflowService._find_correlated_deploy_event(item, heads),
         )
 
+    def test_direct_landed_commit_resolves_without_a_pr(self):
+        """PLS-1515: a commit landed straight on main, with no linked PR,
+        resolves its production DeploymentEvent. A task that records no landed
+        fix is still refused."""
+        item = Item.objects.create(
+            mode='task', project=self.project,
+            item_key=f'PLAT-{self._next_item_number}',
+            title='direct landed remediation', description='x',
+            status='awaiting_deploy', workflow_name='autonomous-bug',
+            created_by_id=1, created_by_email='jun@shizuha.com',
+            metadata={
+                'landed_commit_sha': MERGED_SHA,
+                'landed_repo': CORTEX_REPO,
+            },
+        )
+        self._next_item_number += 1
+        self._deploy_event(item, repo=CORTEX_REPO, commit_sha=MERGED_SHA)
+        missing = WorkflowService._collect_deploy_verify_missing(item, 'deployed')
+        self.assertNotIn('missing_merged_head_sha', missing)
+        self.assertNotIn('missing_correlated_deploy_event', missing)
+
+    def test_no_landed_fix_is_still_refused(self):
+        """PLS-1515: a dev task with no PR and no landed commit stays refused."""
+        item = Item.objects.create(
+            mode='task', project=self.project,
+            item_key=f'PLAT-{self._next_item_number}',
+            title='no fix landed', description='x',
+            status='awaiting_deploy', workflow_name='autonomous-bug',
+            created_by_id=1, created_by_email='jun@shizuha.com',
+            metadata={},
+        )
+        self._next_item_number += 1
+        missing = WorkflowService._collect_deploy_verify_missing(item, 'deployed')
+        self.assertIn('missing_merged_head_sha', missing)
+
     def test_ryo_fixture_head_sha_event_correlates(self):
         """Feature-head SHA identity (legacy producers) still correlates."""
         item = self._item()

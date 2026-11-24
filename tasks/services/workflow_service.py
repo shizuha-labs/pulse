@@ -5068,6 +5068,35 @@ class WorkflowService:
         return heads
 
     @staticmethod
+    def _direct_landed_heads(item):
+        """PLS-1515: a commit landed straight on the default branch, no PR.
+
+        Remediations that were committed to main directly have no linked PR, so
+        ``_merged_pr_heads`` is empty and the deploy-verify gate refuses the
+        close with ``missing_merged_head_sha`` even after the commit shipped.
+        The landed commit is recorded as a full 40-char SHA in
+        ``metadata.landed_commit_sha`` together with ``metadata.landed_repo``
+        (``owner/repo``). Both are required. A short SHA, a missing repo, or a
+        task with no landed fix returns nothing, and the gate still refuses.
+        """
+        md = getattr(item, 'metadata', None)
+        if not isinstance(md, dict):
+            return []
+        sha = WorkflowService._normalize_scm_sha(
+            md.get('landed_commit_sha') or ''
+        )
+        repo = str(md.get('landed_repo') or '').strip().strip('/')
+        if not sha or len(sha) < 40 or not repo or '/' not in repo:
+            return []
+        return [{
+            'sha': sha,
+            'sha_kind': 'direct_landed',
+            'repo': repo,
+            'number': 0,
+            'url': '',
+        }]
+
+    @staticmethod
     def _merged_content_ci_only(item, budget_end=None) -> bool:
         """PLS-1249: True when EVERY merged linked PR touched only CI-only
         paths (tests/docs/CI-config). Derived from the merged content via the
@@ -7172,9 +7201,25 @@ class WorkflowService:
                     ev = None
         if not merged_heads and ev is None:
             ev = WorkflowService._projected_qa_deploy_event(item)
+            # PLS-1515: a remediation committed straight to the default branch
+            # has no linked PR, so there is no merged head to correlate. When
+            # the task records the landed commit and its repo, that commit is
+            # the correlation base: a production DeploymentEvent whose commit is
+            # the landed SHA, or a descendant of it, resolves the close. A task
+            # with no landed fix still records nothing and is refused below.
             if ev is None:
+                merged_heads = WorkflowService._direct_landed_heads(item)
+            if ev is None and not merged_heads:
                 missing.append(WorkflowService._MISSING_MERGED_HEAD)
                 return missing
+            # The landed heads are filled in inside this branch, so the elif
+            # below (which runs the correlation search) never executes for
+            # them. Search here, or a recorded landed SHA always ends in
+            # missing_correlated_deploy_event (review on pulse#1079).
+            if ev is None and merged_heads:
+                ev = WorkflowService._find_correlated_deploy_event(
+                    item, merged_heads, budget_end=budget_end,
+                )
         elif merged_heads and ev is None:
             ev = WorkflowService._find_correlated_deploy_event(
                 item, merged_heads, budget_end=budget_end,
