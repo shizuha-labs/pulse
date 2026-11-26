@@ -25,7 +25,7 @@ dependencies = [
   "djangorestframework-simplejwt>=5.3.0",
   "django-allauth>=0.61.0",
   "dj-rest-auth>=5.0.0",
-  "PyJWT>=2.13.0",
+  "PyJWT>=2.15.1",
   "cryptography>=41.0.0",
   "opentelemetry-api>=1.27.0,<2.0",
   "opentelemetry-sdk>=1.27.0,<2.0",
@@ -71,7 +71,7 @@ constraint-dependencies = ["sqlparse>=0.6.0"]
 # after the cooldown. Same security-fix override as sqlparse and pyjwt.
 # PLAT-12182: certifi 2026.10.23 (GHSA-6q48-6c7w-9gw2 floor >=2026.10.19)
 # published 2026-10-23, after the cooldown. Same security-fix override.
-exclude-newer-package = { sqlparse = "2026-08-13T19:16:10Z", pyjwt = "2026-09-24T00:00:00Z", urllib3 = "2026-09-16T00:00:00Z", pillow = "2026-10-18T00:00:00Z", certifi = "2026-10-24T00:00:00Z", django = "2026-10-07T00:00:00Z", djangorestframework = "2026-10-07T00:00:00Z" }
+exclude-newer-package = { sqlparse = "2026-08-13T19:16:10Z", pyjwt = "2026-09-29T00:00:00Z", urllib3 = "2026-09-16T00:00:00Z", pillow = "2026-10-18T00:00:00Z", certifi = "2026-10-24T00:00:00Z", django = "2026-10-07T00:00:00Z", djangorestframework = "2026-10-07T00:00:00Z" }
 # PLAT-1611 (semgrep uv-missing-dependency-cooldown, CWE-829): wait ~7 days before
 # resolving newly published package versions, so a freshly-published malicious or
 # broken release isn't pulled into a build immediately.
